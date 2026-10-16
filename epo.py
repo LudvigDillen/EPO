@@ -130,7 +130,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             confidence (when available).
         R_lr, t_lr: Learning rates for raw rotation / translation parameters.
         k_lr: Learning rate for camera intrinsics.
-        z_lr: Learning rate for depth scale/shift.
+        z_lr: Learning rate for the selected depth correction.
+        depth_parameterization: ``"affine"`` (existing per-edge scale/shift)
+            or ``"point-mlp"`` (shared sc3r camera-space XYZ MLP).
         mlp_pose_lr: Learning rate for the pose-refinement MLP and its
             translation offset.
         grad_R, grad_t: Whether to optimize raw rotation matrices /
@@ -231,6 +233,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         sampling_factor=5,
         reprojection_error=3,
         run_mode="inference",  # or "debug" for deterministic results and more logging
+        depth_parameterization="affine",
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -244,6 +247,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if camera_model not in CAMERA_MODELS:
             raise ValueError(
                 f"camera_model must be one of {CAMERA_MODELS}, got {camera_model!r}"
+            )
+        if depth_parameterization not in ("affine", "point-mlp"):
+            raise ValueError(
+                "depth_parameterization must be 'affine' or 'point-mlp', "
+                f"got {depth_parameterization!r}"
             )
         self.device = device
         self.dtype = torch.float32
@@ -376,6 +384,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.t_lr = t_lr
         self.k_lr = k_lr
         self.z_lr = z_lr
+        self.depth_parameterization = depth_parameterization
         self.mlp_pose_lr = mlp_pose_lr
         self.grad_R = grad_R
         self.grad_t = grad_t
@@ -513,7 +522,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.pad_masks = BaseModule(self.image_id_map, pad_masks, self.device)
         self.dt_fields = BaseModule(self.image_id_map, dt_fields, self.device)
         self.images_hw = BaseModule(self.image_id_map, images_shapes, self.device)
-        self.sampled_depth = DepthModule(
+        depth_kwargs = dict(
             image_id_map=self.image_id_map,
             depth=sampled_depth,
             device=self.device,
@@ -523,6 +532,26 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             warmup_steps=self.warmup_steps,
             dtype=self.dtype,
         )
+        if self.depth_parameterization == "point-mlp":
+            from modules.point_mlp_depth import PointMLPDepthModule
+
+            image_names = sorted(self.images)
+            camera_indices = [
+                self.intrinsics.image_to_tensor_idx[self.images[name]["cam_id"]]
+                for name in image_names
+            ]
+            intrinsics = self.intrinsics.get_intrinsic_matrix(
+                torch.tensor(camera_indices, device=self.device)
+            ).detach()
+            self.sampled_depth = PointMLPDepthModule(
+                **depth_kwargs,
+                pixels=edges_padded,
+                intrinsics=intrinsics,
+                valid_masks=pad_masks,
+                random_seed=self.seed,
+            )
+        else:
+            self.sampled_depth = DepthModule(**depth_kwargs)
 
         # Prepare viewgraph with indices for faster access during optimization.
         # Plain-int dict lookups: map_names_to_indices would build a 1-element

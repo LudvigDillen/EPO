@@ -86,6 +86,11 @@ def main():
         help="Max EPO optimization iterations.",
     )
     parser.add_argument(
+        "--depth_parameterization", "--depth-parameterization",
+        choices=("affine", "point-mlp"), default="affine",
+        help="Depth correction in EPO; affine preserves the existing per-edge baseline.",
+    )
+    parser.add_argument(
         "--early_stop",
         type=str,
         default="pose",
@@ -155,6 +160,7 @@ def main():
         backend="triton",
         use_amp=True,
         max_num_iterations=args.max_iterations,
+        depth_parameterization=args.depth_parameterization,
         single_camera_per_folder=True,  # share one camera across all "<cam_id>/..." images.
         verbose=False,
         log_granular_time=False,

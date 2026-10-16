@@ -473,6 +473,7 @@ class ReconstructAndVizModule:
             "grad_t_offset": self.grad_t_offset,
             "grad_k": self.grad_k,
             "grad_z": self.grad_z,
+            "depth_parameterization": self.depth_parameterization,
             "grad_mlp_pose_refinement": self.use_mlp_pose_refinement,
             "lr_mlp_pose": self.mlp_pose_lr,
             "lr_k": self.k_lr,

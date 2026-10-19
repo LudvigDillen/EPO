@@ -36,6 +36,7 @@ from helpers.cuda_graph_ops import (
 )
 from helpers.frustum import build_view_graph_from_frustums
 from helpers.load import (
+    camera_group,
     find_images,
     load_and_preprocess_depths,
     load_and_preprocess_images,
@@ -106,8 +107,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             excluded from edge sampling. Reduces constraints but helps when
             those regions change a lot across views.
         images_size: Target side length in pixels after resize. Default 518.
-        single_camera_per_folder: If True, all images in a subfolder share a
-            single intrinsics block.
+        single_camera_per_folder: If True, images share one intrinsics block
+            per top-level folder, including images directly in images_path.
         load_with_pad: If True, pad images to a square before resizing.
         detector: Edge detector name (currently ``"canny"``).
         detector_params: Keyword arguments forwarded to the detector.
@@ -1695,8 +1696,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # Reading cameras from images (to handle multiple images with same camera)
             for image in self.recon.images.values():
                 new_params = self._camera_params(image.camera, image.name)
-                # assuming image names are like "cam_id/image_name"
-                cam_id = image.name.split("/")[0]
+                cam_id = camera_group(image.name)
 
                 # I want to stack params of same cam_id to then averaged them
                 if cam_id not in intrinsics:
@@ -1761,7 +1761,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
             # trusting the folders structure, VGGT returns one camera per image a priori
             if self.single_camera_per_folder:
-                cam_id = image.name.split("/")[0]
+                cam_id = camera_group(image.name)
             else:
                 cam_id = str(image.camera_id)
 
@@ -1906,7 +1906,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         Images and depths must already be at ``self.images_size``. Cameras
         follow ``single_camera_per_folder``: when True, all images under the
         same ``"cam_id/..."`` folder share one (jointly optimized) camera with
-        averaged init intrinsics; when False, each image gets its own camera.
+        averaged init intrinsics; root-level images also share one camera.
+        When False, each image gets its own camera.
         """
         if not ff_data:
             raise ValueError("ff_data is empty")
@@ -1943,7 +1944,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # cam_id is shared per folder when single_camera_per_folder
             # (e.g. all "1/..." images share one camera, matching the disk
             # path), otherwise unique per image.
-            cam_id = name.split("/")[0] if self.single_camera_per_folder else name
+            cam_id = camera_group(name) if self.single_camera_per_folder else name
             self.images[name] = {
                 "image": img,
                 "depth": dep,

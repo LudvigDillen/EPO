@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 
 
 ### Loading and preprocessing images and depths
+def camera_group(image_name: str) -> str:
+    """Group relative image names by top-level folder, with '.' for root images."""
+    return image_name.split("/", 1)[0] if "/" in image_name else "."
+
+
 def find_images(images_path: str, verbose: bool = False) -> list[str]:
     """Find all images in the given path, including subdirectories.
 

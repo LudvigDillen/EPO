@@ -65,13 +65,27 @@ def test_cuda_geometry_bank_replays_and_backpropagates():
     head = GeometryHead(state)
     head.parameters = lambda recurse=True: [*state.sampled_depth.parameters(), k, poses]
     graph = capture_forward_backward(head)
-    for _ in range(2):
-        state.sampled_depth.optimizer.zero_grad()
+    leaves = head.parameters()
+    previous_bank = None
+    for targets_only in (True, False):
         output = graph()
         expected = GeometryHead(state)()
         torch.testing.assert_close(output[2], expected[2])
         torch.testing.assert_close(output[3], expected[3])
-        (output[2].sum() + output[3].sum()).backward()
+        if previous_bank is not None:
+            assert not torch.equal(output[3], previous_bank), "Target bank is stale"
+        previous_bank = output[3].detach().clone()
+        # Compare eager/captured gradients, including target-bank-only supervision.
+        for p in leaves:
+            p.grad = None
+        (expected[3].sum() if targets_only else expected[2].sum() + expected[3].sum()).backward()
+        eager_grads = [torch.zeros_like(p) if p.grad is None else p.grad.clone() for p in leaves]
+        for p in leaves:
+            p.grad = None
+        (output[3].sum() if targets_only else output[2].sum() + output[3].sum()).backward()
+        for p, eager_grad in zip(leaves, eager_grads):
+            captured_grad = torch.zeros_like(p) if p.grad is None else p.grad
+            torch.testing.assert_close(captured_grad, eager_grad)
         grad = state.sampled_depth.model.biases[-1].grad
         assert torch.isfinite(grad).all() and (grad.abs().sum(-1) > 0).all()
         state.sampled_depth.optimizer.step()

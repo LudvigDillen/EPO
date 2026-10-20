@@ -235,6 +235,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         reprojection_error=3,
         run_mode="inference",  # or "debug" for deterministic results and more logging
         depth_parameterization="affine",
+        residual_type="dtf",
+        depth_residual_threshold=0.1,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -255,6 +257,16 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 f"got {depth_parameterization!r}"
             )
         self.device = device
+        if residual_type not in ("dtf", "depth"):
+            raise ValueError("residual_type must be 'dtf' or 'depth'")
+        if residual_type == "depth" and (
+            depth_parameterization != "point-mlp" or camera_model != "SIMPLE_PINHOLE"
+        ):
+            raise ValueError("Depth residuals require point-mlp and SIMPLE_PINHOLE cameras")
+        if not 0 < depth_residual_threshold < 2:
+            raise ValueError("depth_residual_threshold must be in (0, 2)")
+        self.residual_type = residual_type
+        self.depth_residual_threshold = depth_residual_threshold
         self.dtype = torch.float32
 
         # Timings: created up-front so anything before the explicit "Loading"
@@ -550,7 +562,14 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 intrinsics=intrinsics,
                 valid_masks=pad_masks,
                 random_seed=self.seed,
+                target_depths=(torch.stack([self.images[n]["depth"] for n in image_names])
+                               if self.residual_type == "depth" else None),
             )
+            if self.residual_type == "depth":
+                # Fixed pixel-coordinate transform; apply it to LIVE K each step.
+                self.depth_bank_transform = (
+                    self.sampled_depth.target_intrinsics @ torch.linalg.inv(intrinsics)
+                ).detach()  # [N,3,3]
         else:
             self.sampled_depth = DepthModule(**depth_kwargs)
 
@@ -1300,7 +1319,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         k1_batch = self.intrinsics.get_k1(cam_ids)  # (B,), None for pinhole
         P_batch = self.poses.get_projection_matrix(ids)  # (B, 4, 4)
         edges_batch = self.edges_padded.get_parameters(ids)  # (B, N, 2)
-        depth_batch = self.sampled_depth.get_parameters(ids)  # (B, 1, H, W)
+        if self.residual_type == "depth":
+            depth_batch, self.current_target_depths = self.sampled_depth.get_depths_and_target_bank(ids)
+        else:
+            depth_batch = self.sampled_depth.get_parameters(ids)  # [B,L]
 
         # Optionally chunk if batch too large for memory
         B = len(K_batch)
@@ -1373,7 +1395,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 self.unproject_edges_to_3D()
                 return
 
-        poses, cameras, points_3D = self._geometry_graph()
+        geometry = self._geometry_graph()
+        poses, cameras, points_3D = geometry[:3]
+        if self.residual_type == "depth":
+            self.current_target_depths = geometry[3]
         self.poses.poses = poses
         self.intrinsics.cameras = cameras
         self.store_edges_3D(points_3D)
@@ -1498,7 +1523,21 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             s_time = time.perf_counter()
 
             # projection and sampling
-            if not robust:
+            if robust and self.residual_type == "depth":
+                from losses.depth_loss import sampled_depth_residuals
+
+                source_ids = batch["xyz_indices"]
+                target_ids = dt_indices
+                residuals, valid_mask = sampled_depth_residuals(
+                    batch["xyz_world"][source_ids], pad_masks[source_ids],
+                    self.current_target_depths[target_ids],
+                    self.sampled_depth.target_valid_masks[target_ids],
+                    self.depth_bank_transform[target_ids] @ batch["K1"], batch["P1"],
+                    residual_threshold=self.depth_residual_threshold,
+                )
+                total_sum = torch.where(valid_mask, residuals.abs(), 0).sum(dim=1)
+                total_count = valid_mask.sum(dim=1)
+            elif not robust:
                 # Raw (un-clamped, un-Huber'd) DTF distances per edge — the
                 # quantity Eq. (8) calls RE. Masked mean per direction, no
                 # robustification, so the reported value is a true pixel

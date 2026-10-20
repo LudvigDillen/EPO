@@ -139,6 +139,12 @@ def main():
         "or a HF repo id, depending on the wrapper). Defaults to the "
         "WRAPPERS registry entry for --model.",
     )
+    parser.add_argument(
+        "--residual-type", choices=("dtf", "depth"), default="dtf",
+        help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
+    )
+    # TODO: Add graduated non-convexity as in ours
+    parser.add_argument("--depth-residual-threshold", type=float, default=0.1)
     args = parser.parse_args()
 
     # First use of --densify / --3dgsfy: fetch their submodules + packages now,
@@ -161,6 +167,8 @@ def main():
         use_amp=True,
         max_num_iterations=args.max_iterations,
         depth_parameterization=args.depth_parameterization,
+        residual_type=args.residual_type,
+        depth_residual_threshold=args.depth_residual_threshold,
         single_camera_per_folder=True,  # share one camera across all "<cam_id>/..." images.
         verbose=False,
         log_granular_time=False,

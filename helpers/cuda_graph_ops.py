@@ -134,7 +134,12 @@ class GeometryHead(nn.Module):
         epo.intrinsics.cameras = None
         cameras = epo.intrinsics.get_intrinsic_matrix(None)
         epo.intrinsics.cameras = cameras
-        return poses, cameras, epo.compute_edges_3D()
+        points = epo.compute_edges_3D()
+        if epo.residual_type == "depth":
+            # Must be a graph output: otherwise target-depth gradients bypass
+            # the captured backward and target tensors become stale on replay.
+            return poses, cameras, points, epo.current_target_depths
+        return poses, cameras, points
 
 
 class StaticGraph:

@@ -21,7 +21,8 @@ def make_state(device="cpu"):
         target_depths=bank, device=device, warmup_steps=1, max_num_iterations=4,
     )
     state = SimpleNamespace(
-        residual_type="depth", depth_residual_threshold=0.1, sampled_depth=module,
+        residual_type="depth", depth_residual_threshold=0.1, depth_graduated_nonconvexity=False,
+        sampled_depth=module,
         poses=SimpleNamespace(poses=None, get_projection_matrix=lambda ids: poses if ids is None else poses[ids]),
         intrinsics=SimpleNamespace(cameras=None, get_intrinsic_matrix=lambda ids: k if ids is None else k[ids],
                                    get_k1=lambda ids: None),
@@ -89,3 +90,27 @@ def test_cuda_geometry_bank_replays_and_backpropagates():
         grad = state.sampled_depth.model.biases[-1].grad
         assert torch.isfinite(grad).all() and (grad.abs().sum(-1) > 0).all()
         state.sampled_depth.optimizer.step()
+
+
+def test_graduated_cutoff_matches_standalone_and_reaches_residual_gate():
+    from depth_refinement.optimization.optimizer import DepthOptimizerConfig, _optimization_residual_threshold
+
+    state, _, _ = make_state()
+    state.edges_3D = SimpleNamespace(params=GeometryHead(state)()[2])
+    state.depth_graduated_nonconvexity = True
+    state.depth_graduated_threshold_start = 0.05
+    state.depth_graduated_threshold_end = 0.02
+    state.max_num_iterations = 5
+    config = DepthOptimizerConfig(iterations=5, graduated_nonconvexity=True,
+                                 graduated_threshold_start=0.05, graduated_threshold_end=0.02)
+    pairs = torch.tensor([[0, 1, 0, 1]])
+    with patch("losses.depth_loss.sampled_depth_residuals",
+               return_value=(torch.zeros(2, 2), torch.ones(2, 2, dtype=torch.bool))) as residuals:
+        for iteration, expected in enumerate((0.05, 0.035, 0.02, 0.02, 0.02)):
+            EPO.compute_forward_step(state, pairs, step=iteration)
+            actual = residuals.call_args.kwargs["residual_threshold"]
+            assert abs(actual - expected) < 1e-8
+            assert actual == _optimization_residual_threshold(config, iteration)
+        state.depth_graduated_nonconvexity = False
+        EPO.compute_forward_step(state, pairs, step=4)
+        assert residuals.call_args.kwargs["residual_threshold"] == state.depth_residual_threshold

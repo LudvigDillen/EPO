@@ -143,8 +143,11 @@ def main():
         "--residual-type", choices=("dtf", "depth"), default="dtf",
         help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
     )
-    # TODO: Add graduated non-convexity as in ours
     parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
+    parser.add_argument("--depth-graduated-nonconvexity", action=argparse.BooleanOptionalAction,
+                        default=False, help="Decay depth cutoff over the first half of training")
+    parser.add_argument("--depth-graduated-threshold-start", type=float, default=0.05)
+    parser.add_argument("--depth-graduated-threshold-end", type=float, default=0.02)
     parser.add_argument(
         "--source-sampling", choices=("edges", "uniform"), default="edges",
         help="Source points for depth residuals; uniform covers the valid image grid.",
@@ -176,6 +179,9 @@ def main():
         depth_parameterization=args.depth_parameterization,
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,
+        depth_graduated_nonconvexity=args.depth_graduated_nonconvexity,
+        depth_graduated_threshold_start=args.depth_graduated_threshold_start,
+        depth_graduated_threshold_end=args.depth_graduated_threshold_end,
         source_sampling=args.source_sampling,
         uniform_samples_per_image=args.uniform_samples_per_image,
         extract_edges_for_visualization=args.extract_edges_for_visualization,

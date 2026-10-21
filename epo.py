@@ -27,6 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from depth_refinement.optimization.sampling import pixel_grid
+from depth_refinement.optimization.schedules import graduated_residual_threshold
 
 from epo_modules import MiscModule, ReconstructAndVizModule
 from helpers.benchmark_pose import eval_colmap_model
@@ -241,6 +242,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         source_sampling="edges",
         uniform_samples_per_image=12288,
         extract_edges_for_visualization=False,
+        depth_graduated_nonconvexity=False,
+        depth_graduated_threshold_start=0.05,
+        depth_graduated_threshold_end=0.02,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -271,6 +275,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
         self.depth_residual_threshold = depth_residual_threshold
+        if not 0 < depth_graduated_threshold_end <= depth_graduated_threshold_start < 2:
+            raise ValueError("Depth graduated cutoffs must satisfy 0 < end <= start < 2")
+        if depth_graduated_nonconvexity and residual_type != "depth":
+            raise ValueError("Depth graduated non-convexity requires residual_type='depth'")
+        self.depth_graduated_nonconvexity = depth_graduated_nonconvexity
+        self.depth_graduated_threshold_start = depth_graduated_threshold_start
+        self.depth_graduated_threshold_end = depth_graduated_threshold_end
         if source_sampling not in ("edges", "uniform"):
             raise ValueError("source_sampling must be 'edges' or 'uniform'")
         if source_sampling == "uniform" and residual_type != "depth":
@@ -1495,6 +1506,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         else:
             progress = step / clamp_warmup_iters
             clamp_max = clamp_start + (clamp_end - clamp_start) * progress
+        depth_threshold = self.depth_residual_threshold
+        if self.residual_type == "depth" and self.depth_graduated_nonconvexity:
+            depth_threshold = graduated_residual_threshold(
+                self.max_num_iterations - 1 if step is None else step,
+                self.max_num_iterations,
+                self.depth_graduated_threshold_start, self.depth_graduated_threshold_end,
+            )
         # reduce viewgraph if too large
         if len(sampled_viewgraph) > self.max_viewgraph_pairs:
             indices = torch.randperm(len(sampled_viewgraph), generator=self.rng_cpu)[
@@ -1553,7 +1571,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                     self.current_target_depths[target_ids],
                     self.sampled_depth.target_valid_masks[target_ids],
                     self.depth_bank_transform[target_ids] @ batch["K1"], batch["P1"],
-                    residual_threshold=self.depth_residual_threshold,
+                    residual_threshold=depth_threshold,
                 )
                 total_sum = torch.where(valid_mask, residuals.abs(), 0).sum(dim=1)
                 total_count = valid_mask.sum(dim=1)

@@ -144,7 +144,7 @@ def main():
         help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
     )
     # TODO: Add graduated non-convexity as in ours
-    parser.add_argument("--depth-residual-threshold", type=float, default=0.1)
+    parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
     parser.add_argument(
         "--source-sampling", choices=("edges", "uniform"), default="edges",
         help="Source points for depth residuals; uniform covers the valid image grid.",

@@ -475,6 +475,8 @@ class ReconstructAndVizModule:
             "grad_z": self.grad_z,
             "depth_parameterization": self.depth_parameterization,
             "residual_type": self.residual_type,
+            "source_sampling": self.source_sampling,
+            "uniform_samples_per_image": self.uniform_samples_per_image,
             "depth_residual_threshold": self.depth_residual_threshold,
             "grad_mlp_pose_refinement": self.use_mlp_pose_refinement,
             "lr_mlp_pose": self.mlp_pose_lr,

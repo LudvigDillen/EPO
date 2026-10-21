@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from depth_refinement.optimization.sampling import pixel_grid
 
 from epo_modules import MiscModule, ReconstructAndVizModule
 from helpers.benchmark_pose import eval_colmap_model
@@ -237,6 +238,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_parameterization="affine",
         residual_type="dtf",
         depth_residual_threshold=0.1,
+        source_sampling="edges",
+        uniform_samples_per_image=12288,
+        extract_edges_for_visualization=False,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -267,6 +271,15 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
         self.depth_residual_threshold = depth_residual_threshold
+        if source_sampling not in ("edges", "uniform"):
+            raise ValueError("source_sampling must be 'edges' or 'uniform'")
+        if source_sampling == "uniform" and residual_type != "depth":
+            raise ValueError("Uniform source sampling requires residual_type='depth'")
+        self.source_sampling = source_sampling
+        if uniform_samples_per_image < 1:
+            raise ValueError("uniform_samples_per_image must be positive")
+        self.uniform_samples_per_image = uniform_samples_per_image
+        self.extract_edges_for_visualization = extract_edges_for_visualization
         self.dtype = torch.float32
 
         # Timings: created up-front so anything before the explicit "Loading"
@@ -349,7 +362,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             **(detector_params or {}),
         }
 
-        if detector == "canny":
+        if source_sampling == "uniform" and not extract_edges_for_visualization:
+            self.edge_extractor = None
+        elif detector == "canny":
             from extractors.canny import CannyEdgeDetector
 
             self.edge_extractor = CannyEdgeDetector(
@@ -476,13 +491,17 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
         ## Extract edges
         s_time = time.perf_counter()
-        self._extract_edges()  # into self.images
+        if self.edge_extractor is not None:
+            self._extract_edges()  # into self.images
+        if self.source_sampling == "uniform":
+            self._sample_uniform_sources()
         if self.log_granular_time:
             self.timings["extract_edges"] = time.perf_counter() - s_time
 
         ## Compute Distance Fields
         s_time = time.perf_counter()
-        self._compute_distance_fields()  # into self.images
+        if self.residual_type == "dtf":
+            self._compute_distance_fields()  # into self.images
         if self.log_granular_time:
             self.timings["compute_distance_fields"] = time.perf_counter() - s_time
 
@@ -509,7 +528,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # collecting data into big tensors
             edges_padded.append(self.images[image_name]["edges_padded"])
             pad_masks.append(self.images[image_name]["pad_mask"])
-            dt_fields.append(self.images[image_name]["dt_field"])
+            if self.residual_type == "dtf":
+                dt_fields.append(self.images[image_name]["dt_field"])
             images_shapes.append(torch.tensor(self.images[image_name]["hw"]))
             sampled_depth.append(self.images[image_name]["sampled_depth"])
 
@@ -519,7 +539,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         )
         pad_masks = torch.stack(pad_masks, dim=0).to(self.device).bool()
         dt_fields = (
-            torch.stack(dt_fields, dim=0).to(self.device, dtype=self.dtype).unsqueeze(1)
+            torch.stack(dt_fields, dim=0).to(self.device, dtype=self.dtype).unsqueeze(1) if dt_fields else None
         )
         # int32: consumed as integer H/W bounds by both backends; matches the
         # Triton wrapper's expected dtype so its per-call .to(int32) is a no-op.
@@ -533,7 +553,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # storing
         self.edges_padded = BaseModule(self.image_id_map, edges_padded, self.device)
         self.pad_masks = BaseModule(self.image_id_map, pad_masks, self.device)
-        self.dt_fields = BaseModule(self.image_id_map, dt_fields, self.device)
+        self.dt_fields = BaseModule(self.image_id_map, dt_fields, self.device) if dt_fields is not None else None
         self.images_hw = BaseModule(self.image_id_map, images_shapes, self.device)
         depth_kwargs = dict(
             image_id_map=self.image_id_map,
@@ -1438,7 +1458,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # a ~550 MB per-batch gather on 518² fields. The torch backend
         # materialises the per-batch view internally (since F.grid_sample
         # needs (B, 1, H, W)).
-        dt_fields_src = self.dt_fields.params
+        dt_fields_src = self.dt_fields.params if self.dt_fields is not None else None
         dt_indices = images_names_ji
 
         return batch, pad_masks, dt_fields_src, dt_indices
@@ -2304,10 +2324,42 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             )
             tot_edges += valid_edges.shape[0]
         self.observations = tot_edges
+        if self.source_sampling == "uniform":
+            return  # Visualization only; source sampling is handled separately.
 
         # pad to have same number of edges per image
         self._pad_edges()
+        self._sample_source_depths()
 
+    @torch.no_grad()
+    def _sample_uniform_sources(self):
+        """Select uniformly spaced pixels with valid depth.
+
+        Store them in EPO's existing source-sample fields (still named 'edges'),
+        then subsample/pad them for batched processing and look up their depths.
+        """
+        budget = self.uniform_samples_per_image
+        self.max_edges = budget  # reuse EPO's existing cap/padding code
+        for data in self.images.values():
+            height, width = data["hw"]
+            stride = max(1, int(np.sqrt(height * width / max(budget, 1))))
+            points = pixel_grid(height, width, device=data["depth"].device,
+                                dtype=self.dtype, stride=stride).reshape(-1, 2)
+            xy = points.long()  # [L,2], integer pixel centers
+            depths = data["depth"][xy[:, 1], xy[:, 0]]  # [L]
+            valid = torch.isfinite(depths) & (depths > 0)
+            if self.use_depth_confidence and "confidence" in data:
+                confidence = data["confidence"]
+                confidence = (confidence - confidence.min()) / (confidence.max() - confidence.min()).clamp_min(1e-8)
+                valid &= confidence[xy[:, 1], xy[:, 0]] > 0.2
+            data["edges"] = points[valid]  # [M,2], not restricted to detected edges
+        self._pad_edges()
+        self._sample_source_depths()
+        self.observations = sum(int(d["pad_mask"].sum()) for d in self.images.values())
+
+    def _sample_source_depths(self):
+        """Sample original depths for either edge or uniform source coordinates."""
+        names = list(self.images)
         # add sampled depth at edges_padded locations, all images in one call:
         # edges are padded to one count and depths to one shape, and nearest
         # sampling is per point, so each row matches a per-image call
@@ -2446,6 +2498,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
         # Unproject point to world coordinates
         self.unproject_edges_to_3D()
+
+        if self.dt_fields is None:
+            return  # Refresh final geometry, but do not report an edge-DTF error.
 
         # Compute raw (un-robustified) residuals
         residuals, sampled_viewgraphs = self.compute_forward_step(

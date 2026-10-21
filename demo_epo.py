@@ -145,6 +145,13 @@ def main():
     )
     # TODO: Add graduated non-convexity as in ours
     parser.add_argument("--depth-residual-threshold", type=float, default=0.1)
+    parser.add_argument(
+        "--source-sampling", choices=("edges", "uniform"), default="edges",
+        help="Source points for depth residuals; uniform covers the valid image grid.",
+    )
+    parser.add_argument("--uniform-samples-per-image", type=int, default=12288)
+    parser.add_argument("--extract-edges-for-visualization", action="store_true",
+                        help="Also extract edge maps in uniform runs; never used by the depth loss.")
     args = parser.parse_args()
 
     # First use of --densify / --3dgsfy: fetch their submodules + packages now,
@@ -169,6 +176,9 @@ def main():
         depth_parameterization=args.depth_parameterization,
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,
+        source_sampling=args.source_sampling,
+        uniform_samples_per_image=args.uniform_samples_per_image,
+        extract_edges_for_visualization=args.extract_edges_for_visualization,
         single_camera_per_folder=True,  # share one camera across all "<cam_id>/..." images.
         verbose=False,
         log_granular_time=False,

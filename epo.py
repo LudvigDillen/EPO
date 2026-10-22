@@ -246,6 +246,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_graduated_threshold_start=0.05,
         depth_graduated_threshold_end=0.02,
         joint_from_start=False,
+        depth_normal_weight=0.0,
+        depth_normal_max_relative_jump=0.15,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -276,6 +278,14 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
         self.depth_residual_threshold = depth_residual_threshold
+        if not math.isfinite(depth_normal_weight) or depth_normal_weight < 0:
+            raise ValueError("depth_normal_weight must be finite and non-negative")
+        if not math.isfinite(depth_normal_max_relative_jump) or depth_normal_max_relative_jump < 0:
+            raise ValueError("depth_normal_max_relative_jump must be finite and non-negative")
+        if depth_normal_weight > 0 and residual_type != "depth":
+            raise ValueError("Depth normal supervision currently requires residual_type='depth'")
+        self.depth_normal_weight = depth_normal_weight
+        self.depth_normal_max_relative_jump = depth_normal_max_relative_jump
         if not 0 < depth_graduated_threshold_end <= depth_graduated_threshold_start < 2:
             raise ValueError("Depth graduated cutoffs must satisfy 0 < end <= start < 2")
         if depth_graduated_nonconvexity and residual_type != "depth":
@@ -605,6 +615,19 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         else:
             self.sampled_depth = DepthModule(**depth_kwargs)
 
+        self.depth_normal_prior = None
+        if self.depth_normal_weight > 0:
+            from modules.depth_normal_prior import DepthNormalPrior
+
+            module = self.sampled_depth
+            initial_bank = module.query_depth[:, module.edge_count:].reshape(
+                -1, *module.target_size
+            )
+            self.depth_normal_prior = DepthNormalPrior(
+                initial_bank, module.target_valid_masks, module.target_intrinsics,
+                self.depth_normal_max_relative_jump,
+            )
+
         # Prepare viewgraph with indices for faster access during optimization.
         # Plain-int dict lookups: map_names_to_indices would build a 1-element
         # CUDA tensor per call, and torch.tensor() below would then trigger one
@@ -669,6 +692,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.timings["mre"] = 0.0
 
         self.loss_list = []
+        self.depth_loss_list = []  # Unweighted data term (depth or DTF).
+        self.normal_loss_list = []  # Unweighted normal term; zero when disabled.
         self.residuals = {}
         self.lr_list = {"R": [], "t": [], "mlp": [], "k": [], "z": []}
         self.auc_list = {"auc": {th: [] for th in self.auc_th}, "steps": []}
@@ -852,7 +877,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         past_poses = self.poses.get_all_matrices().detach().clone()
 
         # Fixed-lag async per-step stats: each step enqueues its
-        # (loss, err_q, err_t, err_c) as a non-blocking D2H copy into a pinned
+        # (loss, err_q, err_t, err_c, data_loss, normal_loss) as a non-blocking D2H copy into a pinned
         # double buffer and consumes the PREVIOUS step's values. This
         # replaces the per-step hard sync (.tolist()) with an event wait
         # that is one step behind — the host runs a full iteration ahead
@@ -861,7 +886,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # one step later than with the synchronous read — an intentional,
         # bounded semantics change.
         _stats_pinned = [
-            torch.empty(4, dtype=self.dtype, pin_memory=True) for _ in range(2)
+            torch.empty(6, dtype=self.dtype, pin_memory=True) for _ in range(2)
         ]
         _stats_events = [torch.cuda.Event(), torch.cuda.Event()]
         _stats_pending = False  # becomes True after the first enqueue
@@ -948,7 +973,12 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             )
 
             # Compute loss
-            loss = self.compute_batched_loss(residuals, sampled_viewgraphs, debug=debug)
+            depth_loss = self.compute_batched_loss(residuals, sampled_viewgraphs, debug=debug)
+            normal_loss = depth_loss.new_zeros(())
+            loss = depth_loss
+            if self.depth_normal_prior is not None:
+                normal_loss = self.depth_normal_prior(self.current_target_depths)
+                loss = loss + self.depth_normal_weight * normal_loss
             s_time = time.perf_counter()
             loss.backward()
             self._sync_for_timing()  # backward() returns before the GPU is done
@@ -1045,7 +1075,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # consumed below (fixed-lag — no per-step hard sync).
             slot = step % 2
             _stats_pinned[slot].copy_(
-                torch.cat([loss_det.reshape(1), err_qt]), non_blocking=True
+                torch.cat([loss_det.reshape(1), err_qt,
+                           depth_loss.detach().reshape(1), normal_loss.detach().reshape(1)]),
+                non_blocking=True,
             )
             _stats_events[slot].record()
             past_poses = current_poses
@@ -1057,8 +1089,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             if _stats_pending:
                 prev = 1 - slot
                 _stats_events[prev].synchronize()
-                loss_val, err_q, err_t, err_c = _stats_pinned[prev].tolist()
+                loss_val, err_q, err_t, err_c, depth_val, normal_val = _stats_pinned[prev].tolist()
                 self.loss_list.append(loss_val)
+                self.depth_loss_list.append(depth_val)
+                self.normal_loss_list.append(normal_val)
                 max_err = max(err_q, err_t)
                 if self.verbose:
                     self.changes["q"].append(err_q)
@@ -1164,8 +1198,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if _stats_pending:
             slot = step % 2
             _stats_events[slot].synchronize()
-            loss_val, err_q, err_t, err_c = _stats_pinned[slot].tolist()
+            loss_val, err_q, err_t, err_c, depth_val, normal_val = _stats_pinned[slot].tolist()
             self.loss_list.append(loss_val)
+            self.depth_loss_list.append(depth_val)
+            self.normal_loss_list.append(normal_val)
             if self.verbose:
                 self.changes["q"].append(err_q)
                 self.changes["t"].append(err_t)

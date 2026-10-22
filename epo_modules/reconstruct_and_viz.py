@@ -446,6 +446,8 @@ class ReconstructAndVizModule:
             "steps_total": self.max_num_iterations,
             "steps_actual": self.completed_iterations,
             "list_loss": self.loss_list,
+            "list_depth_loss": self.depth_loss_list,
+            "list_normal_loss": self.normal_loss_list,  # Before multiplying by depth_normal_weight.
             "list_lr": self.lr_list,
             "auc_saving_freq": self.auc_saving_freq,
             "list_auc": self.auc_list,
@@ -476,6 +478,8 @@ class ReconstructAndVizModule:
             "depth_parameterization": self.depth_parameterization,
             "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
+            "depth_normal_weight": self.depth_normal_weight,
+            "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,
             "source_sampling": self.source_sampling,
             "uniform_samples_per_image": self.uniform_samples_per_image,
             "depth_residual_threshold": self.depth_residual_threshold,

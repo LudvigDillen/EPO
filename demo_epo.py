@@ -146,6 +146,8 @@ def main():
     parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
     parser.add_argument("--depth-normal-weight", type=float, default=0.0,
                         help="Weight of initial-depth normal preservation (depth residuals only; 0 disables)")
+    parser.add_argument("--depth-normal-weight-schedule", choices=("constant", "linear"),
+                        default="constant", help="Linear decays normal weight to 10% over the full run")
     parser.add_argument("--depth-normal-max-relative-jump", type=float, default=0.15,
                         help="Exclude reference normals across larger relative depth jumps (0 disables masking)")
     parser.add_argument("--depth-graduated-nonconvexity", action=argparse.BooleanOptionalAction,
@@ -197,6 +199,7 @@ def main():
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,
+        depth_normal_weight_schedule=args.depth_normal_weight_schedule,
         depth_normal_max_relative_jump=args.depth_normal_max_relative_jump,
         depth_graduated_nonconvexity=args.depth_graduated_nonconvexity,
         depth_graduated_threshold_start=args.depth_graduated_threshold_start,

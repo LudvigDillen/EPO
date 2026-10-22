@@ -27,7 +27,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
 from depth_refinement.optimization.sampling import pixel_grid
-from depth_refinement.optimization.schedules import graduated_residual_threshold
+from depth_refinement.optimization.schedules import graduated_residual_threshold, normal_loss_weight
 
 from epo_modules import MiscModule, ReconstructAndVizModule
 from helpers.benchmark_pose import eval_colmap_model
@@ -247,6 +247,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_graduated_threshold_end=0.02,
         joint_from_start=False,
         depth_normal_weight=0.0,
+        depth_normal_weight_schedule="constant",
         depth_normal_max_relative_jump=0.15,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
@@ -285,6 +286,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if depth_normal_weight > 0 and residual_type != "depth":
             raise ValueError("Depth normal supervision currently requires residual_type='depth'")
         self.depth_normal_weight = depth_normal_weight
+        if depth_normal_weight_schedule not in ("constant", "linear"):
+            raise ValueError("depth_normal_weight_schedule must be 'constant' or 'linear'")
+        self.depth_normal_weight_schedule = depth_normal_weight_schedule
         self.depth_normal_max_relative_jump = depth_normal_max_relative_jump
         if not 0 < depth_graduated_threshold_end <= depth_graduated_threshold_start < 2:
             raise ValueError("Depth graduated cutoffs must satisfy 0 < end <= start < 2")
@@ -978,7 +982,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             loss = depth_loss
             if self.depth_normal_prior is not None:
                 normal_loss = self.depth_normal_prior(self.current_target_depths)
-                loss = loss + self.depth_normal_weight * normal_loss
+                normal_weight = normal_loss_weight(
+                    step, self.max_num_iterations, self.depth_normal_weight,
+                    self.depth_normal_weight_schedule,
+                )
+                loss = loss + normal_weight * normal_loss
             s_time = time.perf_counter()
             loss.backward()
             self._sync_for_timing()  # backward() returns before the GPU is done

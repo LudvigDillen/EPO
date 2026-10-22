@@ -17,13 +17,16 @@ from modules.point_mlp_depth import PointMLPDepthModule
 def test_runner_normal_options():
     root = Path(__file__).resolve().parents[3]
     command = 'conda() { printf "%s\\n" "$*"; }; export -f conda; bash scripts/run_epo_subsampled.sh'
-    for method, weight in (("ours", "0.0"), ("ours", "0.01"), ("EPO", "0.01")):
+    for method, weight, schedule in (("ours", "0.0", "constant"),
+                                    ("ours", "0.01", "linear"), ("EPO", "0.01", "linear")):
         env = dict(os.environ, METHOD=method, DEPTH_NORMAL_WEIGHT=weight,
+                   DEPTH_NORMAL_WEIGHT_SCHEDULE=schedule,
                    DEPTH_NORMAL_MAX_RELATIVE_JUMP="0.15", VIS="false")
         result = subprocess.run(["bash", "-c", command], cwd=root, env=env,
                                 capture_output=True, text=True, check=True)
         if method == "ours":
             assert f"--depth-normal-weight {weight}" in result.stdout
+            assert f"--depth-normal-weight-schedule {schedule}" in result.stdout
             assert "--depth-normal-max-relative-jump 0.15" in result.stdout
         else:
             assert "--depth-normal" not in result.stdout

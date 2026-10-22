@@ -711,6 +711,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         visualization_gt_path=None,
         spawn_rerun=True,
         rerun_save_path=".",
+        rerun_points_interval=50,
+        rerun_max_points=20000,
         scene_name="data",
         opt="optimized_reconstruction/_current_test",
     ):
@@ -780,6 +782,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
         forward_start = time.perf_counter()
 
+        if rerun_points_interval < 0 or rerun_max_points < 1:
+            raise ValueError("Rerun point interval must be non-negative and point limit positive")
         if use_rerun:
             import rerun as rr  # lazy: ~0.14 s per process to import
 
@@ -964,11 +968,14 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 else:
                     rr.set_time("step", sequence=step)
 
+                log_points = rerun_points_interval > 0 and (
+                    step % rerun_points_interval == 0 or step == self.max_num_iterations - 1
+                )
                 self.to_colmap(
                     opt,
                     verbose=False,
-                    max_points_per_image=100_000 // self.num_images,
-                    save_points=False,
+                    max_points_per_image=max(1, rerun_max_points // self.num_images),
+                    save_points=log_points,
                     final_dbscan_filtering=False,
                     dbscan_eps=0.1,
                     dbscan_min_samples=5,
@@ -979,7 +986,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                     opt,
                     entity="opt",
                     static_cameras=False,
-                    points3D=False,
+                    points3D=log_points,
                     static_points=False,
                     camera_color=[186, 39, 34],  # red
                 )

@@ -635,6 +635,6 @@ class ReconstructAndVizModule:
 
             rr.log(
                 f"world/{entity}/points",
-                rr.Points3D(np.array(pts), colors=np.array(colors), radii=0.01),
+                rr.Points3D(np.array(pts), colors=np.array(colors), radii=0.003),
                 static=static_points,
             )

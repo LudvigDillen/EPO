@@ -156,7 +156,11 @@ def main():
     parser.add_argument("--extract-edges-for-visualization", action="store_true",
                         help="Also extract edge maps in uniform runs; never used by the depth loss.")
     parser.add_argument("--visualize", action=argparse.BooleanOptionalAction, default=False,
-                        help="Record camera motion to <output_path>/rerun/optimization.rrd")
+                        help="Record cameras and periodic point clouds to <output_path>/rerun/optimization.rrd")
+    parser.add_argument("--rerun-points-interval", type=int, default=50,
+                        help="Point-cloud logging interval in iterations (0 disables point clouds)")
+    parser.add_argument("--rerun-max-points", type=int, default=20000,
+                        help="Approximate total point limit per logged point cloud")
     parser.add_argument("--spawn-rerun", action="store_true",
                         help="Also open the native viewer when --visualize is enabled")
     parser.add_argument("--visualization-gt", default=None,
@@ -251,6 +255,7 @@ def main():
     print("\nRunning EPO refinement...")
     epo(early_stop=args.early_stop, use_rerun=args.visualize,
         visualization_gt_path=args.visualization_gt,
+        rerun_points_interval=args.rerun_points_interval, rerun_max_points=args.rerun_max_points,
         spawn_rerun=args.spawn_rerun, rerun_save_path=args.output_path,
         scene_name="optimization", opt=os.path.join(args.output_path, "rerun", "current_model"))
     epo_opt_time = epo.timings.get("total_optimization", 0.0)

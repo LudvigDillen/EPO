@@ -553,7 +553,7 @@ class ReconstructAndVizModule:
         centers = lambda images: np.stack([
             images[name].cam_from_world().inverse().translation for name in names
         ])
-        transform = pycolmap.estimate_sim3d_robust(centers(gt_images), centers(ref_images))
+        transform = pycolmap.estimate_sim3d_robust(centers(gt_images), centers(ref_images))["tgt_from_src"]
         if transform is None or not np.isfinite(transform.scale) or transform.scale <= 0:
             raise ValueError("Could not align GT cameras to the initial reconstruction")
         self.log_reconstruction_rerun(

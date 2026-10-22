@@ -144,10 +144,12 @@ def main():
         help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
     )
     parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
+    parser.add_argument("--depth-learning-rate", type=float, default=3e-3,
+                        help="Base learning rate for depth correction (MLP or affine); keeps EPO's scheduler")
     parser.add_argument("--depth-normal-weight", type=float, default=0.0,
                         help="Weight of initial-depth normal preservation (depth residuals only; 0 disables)")
     parser.add_argument("--depth-normal-weight-schedule", choices=("constant", "linear"),
-                        default="constant", help="Linear decays normal weight to 10% over the full run")
+                        default="constant", help="Linear decays normal weight to one tenth over the full run")
     parser.add_argument("--depth-normal-max-relative-jump", type=float, default=0.15,
                         help="Exclude reference normals across larger relative depth jumps (0 disables masking)")
     parser.add_argument("--depth-graduated-nonconvexity", action=argparse.BooleanOptionalAction,
@@ -174,6 +176,8 @@ def main():
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
                         help="Optimize depth jointly with poses/intrinsics from the first iteration")
     args = parser.parse_args()
+    if not 0 < args.depth_learning_rate < float("inf"):
+        parser.error("--depth-learning-rate must be finite and positive")
 
     # First use of --densify / --3dgsfy: fetch their submodules + packages now,
     # not after the model and EPO have run (--model's are fetched on load).
@@ -196,6 +200,7 @@ def main():
         max_num_iterations=args.max_iterations,
         joint_from_start=args.joint_from_start,
         depth_parameterization=args.depth_parameterization,
+        z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,

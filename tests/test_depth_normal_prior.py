@@ -32,6 +32,20 @@ def test_runner_normal_options():
             assert "--depth-normal" not in result.stdout
 
 
+def test_runner_depth_learning_rate():
+    root = Path(__file__).resolve().parents[3]
+    command = 'conda() { printf "%s\\n" "$*"; }; export -f conda; bash scripts/run_epo_subsampled.sh'
+    for method in ("ours", "EPO"):
+        for rate in (None, "0.001"):
+            env = dict(os.environ, METHOD=method, VIS="false")
+            env.pop("DEPTH_LEARNING_RATE", None)
+            if rate is not None:
+                env["DEPTH_LEARNING_RATE"] = rate
+            result = subprocess.run(["bash", "-c", command], cwd=root, env=env,
+                                    capture_output=True, text=True, check=True)
+            assert f"--depth-learning-rate {rate or '0.003'}" in result.stdout
+
+
 def inputs():
     depths = torch.full((2, 5, 5), 3.)
     masks = torch.ones_like(depths, dtype=torch.bool)

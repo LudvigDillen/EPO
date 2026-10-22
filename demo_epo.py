@@ -159,6 +159,8 @@ def main():
                         help="Record camera motion to <output_path>/rerun/optimization.rrd")
     parser.add_argument("--spawn-rerun", action="store_true",
                         help="Also open the native viewer when --visualize is enabled")
+    parser.add_argument("--visualization-gt", default=None,
+                        help="COLMAP GT cameras to overlay in green; visualization only")
     args = parser.parse_args()
 
     # First use of --densify / --3dgsfy: fetch their submodules + packages now,
@@ -245,6 +247,7 @@ def main():
     # ── 2. EPO refinement (timed) ────────────────────────────────────────
     print("\nRunning EPO refinement...")
     epo(early_stop=args.early_stop, use_rerun=args.visualize,
+        visualization_gt_path=args.visualization_gt,
         spawn_rerun=args.spawn_rerun, rerun_save_path=args.output_path,
         scene_name="optimization", opt=os.path.join(args.output_path, "rerun", "current_model"))
     epo_opt_time = epo.timings.get("total_optimization", 0.0)

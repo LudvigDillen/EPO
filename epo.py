@@ -705,6 +705,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         gt_path=None,
         ba_path=None,
         use_rerun=False,
+        visualization_gt_path=None,
         spawn_rerun=True,
         rerun_save_path=".",
         scene_name="data",
@@ -783,7 +784,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Y_DOWN, static=True)
 
             # Log Ground Truth if available
-            if gt_path is not None:
+            if visualization_gt_path is not None:
+                # One fixed display alignment, not a GT constraint on optimization.
+                self.to_colmap(opt, save_points=False, verbose=False)
+                self.log_ground_truth_cameras_rerun(visualization_gt_path, opt)
+            elif gt_path is not None:
                 try:
                     logger.debug(f"Loading GT from {gt_path} for visualization...")
                     self.log_reconstruction_rerun(

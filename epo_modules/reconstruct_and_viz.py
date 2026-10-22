@@ -535,6 +535,32 @@ class ReconstructAndVizModule:
             [origin, top_left],
         ]
 
+    def log_ground_truth_cameras_rerun(self, gt_path, reference_path):
+        """Overlay selected GT cameras using one GT-to-initial-export Sim(3).
+
+        The display transform stays fixed throughout optimization, so camera
+        drift remains visible. GT never enters the optimizer or its viewgraph.
+        """
+        from helpers.load import read_reconstruction_without_points
+
+        gt = read_reconstruction_without_points(str(gt_path))
+        reference = read_reconstruction_without_points(str(reference_path))
+        gt_images = {image.name: image for image in gt.images.values()}
+        ref_images = {image.name: image for image in reference.images.values()}
+        names = sorted(ref_images)
+        if len(names) < 3 or not set(names) <= set(gt_images):
+            raise ValueError("GT camera visualization requires at least three matching image names")
+        centers = lambda images: np.stack([
+            images[name].cam_from_world().inverse().translation for name in names
+        ])
+        transform = pycolmap.estimate_sim3d_robust(centers(gt_images), centers(ref_images))
+        if transform is None or not np.isfinite(transform.scale) or transform.scale <= 0:
+            raise ValueError("Could not align GT cameras to the initial reconstruction")
+        self.log_reconstruction_rerun(
+            gt, entity="gt", static_cameras=True, points3D=False,
+            camera_color=[0, 255, 0], image_names=set(names), world_transform=transform,
+        )
+
     def log_reconstruction_rerun(
         self,
         path: str,
@@ -543,6 +569,8 @@ class ReconstructAndVizModule:
         points3D: bool = False,
         static_points: bool = False,
         camera_color: list[int] | None = None,
+        image_names: set[str] | None = None,
+        world_transform=None,
     ) -> None:
         """Log a COLMAP reconstruction (cameras + optional point cloud) to Rerun.
 
@@ -559,8 +587,10 @@ class ReconstructAndVizModule:
 
         if camera_color is None:
             camera_color = [0, 255, 0]
-        recon = pycolmap.Reconstruction(path)
+        recon = path if isinstance(path, pycolmap.Reconstruction) else pycolmap.Reconstruction(path)
         for _img_id, img in recon.images.items():
+            if image_names is not None and img.name not in image_names:
+                continue
             # COLMAP stores world-to-cam (R, t)
             # Rerun needs cam-to-world for the transform
             R_gt = torch.from_numpy(img.cam_from_world().rotation.matrix())
@@ -569,6 +599,10 @@ class ReconstructAndVizModule:
             # C = -R^T * t
             cam_center = -R_gt.T @ t_gt
             cam_rot = R_gt.T  # Rotation from camera to world
+            if world_transform is not None:
+                rotation = torch.from_numpy(world_transform.rotation.matrix())
+                cam_center = float(world_transform.scale) * (rotation @ cam_center) + torch.from_numpy(world_transform.translation)
+                cam_rot = rotation @ cam_rot
 
             rr.log(
                 f"world/{entity}/{img.name}",

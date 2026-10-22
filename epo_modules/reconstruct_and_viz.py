@@ -474,6 +474,7 @@ class ReconstructAndVizModule:
             "grad_k": self.grad_k,
             "grad_z": self.grad_z,
             "depth_parameterization": self.depth_parameterization,
+            "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
             "source_sampling": self.source_sampling,
             "uniform_samples_per_image": self.uniform_samples_per_image,

@@ -161,6 +161,8 @@ def main():
                         help="Also open the native viewer when --visualize is enabled")
     parser.add_argument("--visualization-gt", default=None,
                         help="COLMAP GT cameras to overlay in green; visualization only")
+    parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
+                        help="Optimize depth jointly with poses/intrinsics from the first iteration")
     args = parser.parse_args()
 
     # First use of --densify / --3dgsfy: fetch their submodules + packages now,
@@ -182,6 +184,7 @@ def main():
         backend="triton",
         use_amp=True,
         max_num_iterations=args.max_iterations,
+        joint_from_start=args.joint_from_start,
         depth_parameterization=args.depth_parameterization,
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,

@@ -1,7 +1,7 @@
 """Small integration checks for EPO's selectable depth objective."""
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -57,6 +57,20 @@ def test_depth_objective_wiring_and_dtf_reporting():
         assert dtf.call_count == 1 and torch.equal(reported, torch.ones(2))
     state.residual_type = "dtf"
     assert len(GeometryHead(state)()) == 3
+
+
+def test_joint_depth_phase_keeps_pose_and_intrinsics_updates_enabled():
+    for depth_active in (False, True):
+        state = SimpleNamespace(
+            _cooldown=None, grad_R=False, grad_t=False, use_mlp_pose_refinement=True,
+            grad_z=True, mlp_pose_convergence=depth_active, grad_k=True,
+            poses=Mock(), intrinsics=Mock(), sampled_depth=Mock(),
+            _sync_for_timing=lambda: None, log_granular_time=False,
+        )
+        EPO.optimizer_and_scheduler_step(state)
+        state.poses.optimizer_and_scheduler_step.assert_called_once()
+        state.intrinsics.optimizer_and_scheduler_step.assert_called_once()
+        assert state.sampled_depth.optimizer_and_scheduler_step.call_count == int(depth_active)
 
 
 def test_cuda_geometry_bank_replays_and_backpropagates():

@@ -245,6 +245,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_graduated_nonconvexity=False,
         depth_graduated_threshold_start=0.05,
         depth_graduated_threshold_end=0.02,
+        joint_from_start=False,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -673,7 +674,9 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.auc_list = {"auc": {th: [] for th in self.auc_th}, "steps": []}
         self.convergence = False
         self.changes = {"q": [], "t": [], "max": [], "max_c": [], "steps": [], "z": []}
-        self.mlp_pose_convergence = False
+        self.joint_from_start = joint_from_start
+        self.mlp_pose_convergence = joint_from_start  # also gates depth optimizer steps
+        self._phase2_start = 0
         self.optim_convergence = False
         self.convergence_loss = False
 
@@ -1273,7 +1276,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             self.poses.optimizer_and_scheduler_step()
 
         if self.grad_z is True and self.mlp_pose_convergence is True:
-            # backprop on this without first stabilizing the mlp leads to bad stuff
+            # Enabled after pose warm-up, or immediately with joint_from_start.
             self.sampled_depth.optimizer_and_scheduler_step()
 
         # independent from phase

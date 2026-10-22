@@ -22,6 +22,7 @@ def make_state(device="cpu"):
     )
     state = SimpleNamespace(
         residual_type="depth", depth_residual_threshold=0.1, depth_graduated_nonconvexity=False,
+        dtf_source_count=0,
         sampled_depth=module,
         poses=SimpleNamespace(poses=None, get_projection_matrix=lambda ids: poses if ids is None else poses[ids]),
         intrinsics=SimpleNamespace(cameras=None, get_intrinsic_matrix=lambda ids: k if ids is None else k[ids],
@@ -38,6 +39,20 @@ def make_state(device="cpu"):
     for name in ("compute_edges_3D", "create_batched_inputs"):
         setattr(state, name, MethodType(getattr(EPO, name), state))
     return state, k, poses
+
+
+def test_extra_dtf_sources_are_excluded_from_depth_loss():
+    from unittest.mock import patch
+    from losses.depth_loss import sampled_depth_residuals
+    state, _, _ = make_state()
+    state.dtf_source_count = 1
+    state.uniform_source_count = 1
+    state.device = "cpu"
+    state.edges_3D = SimpleNamespace(params=GeometryHead(state)()[2])
+    with patch("losses.depth_loss.sampled_depth_residuals", wraps=sampled_depth_residuals) as residuals:
+        EPO.compute_forward_step(state, torch.tensor([[0, 1, 0, 1]]))
+    masks = residuals.call_args.args[1]
+    assert masks[:, :1].all() and not masks[:, 1:].any()
 
 
 def test_depth_objective_wiring_and_dtf_reporting():

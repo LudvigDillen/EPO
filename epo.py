@@ -247,6 +247,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_graduated_threshold_end=0.02,
         joint_from_start=False,
         depth_normal_weight=0.0,
+        combined_loss=False,
         depth_normal_weight_schedule="constant",
         depth_normal_max_relative_jump=0.15,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
@@ -278,6 +279,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if not 0 < depth_residual_threshold < 2:
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
+        if combined_loss and (
+            residual_type != "depth" or source_sampling != "uniform"
+        ):
+            raise ValueError("Combined edge samples require depth residuals and uniform source sampling")
+        self.combined_loss = combined_loss
         self.depth_residual_threshold = depth_residual_threshold
         if not math.isfinite(depth_normal_weight) or depth_normal_weight < 0:
             raise ValueError("depth_normal_weight must be finite and non-negative")
@@ -388,7 +394,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             **(detector_params or {}),
         }
 
-        if source_sampling == "uniform" and not extract_edges_for_visualization:
+        if (source_sampling == "uniform" and not extract_edges_for_visualization
+                and not combined_loss):
             self.edge_extractor = None
         elif detector == "canny":
             from extractors.canny import CannyEdgeDetector
@@ -519,14 +526,33 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         s_time = time.perf_counter()
         if self.edge_extractor is not None:
             self._extract_edges()  # into self.images
+        edge_sources = None
+        if self.combined_loss:
+            # Save actual edge samples before uniform sampling replaces these fields.
+            self._pad_edges()
+            self._sample_source_depths()
+            edge_sources = {
+                name: {key: data[key] for key in ("edges_padded", "pad_mask", "sampled_depth")}
+                for name, data in self.images.items()
+            }
         if self.source_sampling == "uniform":
             self._sample_uniform_sources()
+        self.uniform_source_count = self.max_edges
+        self.dtf_source_count = 0
+        if edge_sources is not None:
+            self.dtf_source_count = next(iter(edge_sources.values()))["sampled_depth"].shape[0]
+            if self.dtf_source_count == 0:
+                raise ValueError("Combined loss needs at least one detected edge sample")
+            for name, data in self.images.items():
+                for key in ("edges_padded", "pad_mask", "sampled_depth"):
+                    data[key] = torch.cat((data[key], edge_sources[name][key]), dim=0)
+            self.max_edges += self.dtf_source_count
         if self.log_granular_time:
             self.timings["extract_edges"] = time.perf_counter() - s_time
 
         ## Compute Distance Fields
         s_time = time.perf_counter()
-        if self.residual_type == "dtf":
+        if self.residual_type == "dtf" or self.dtf_source_count:
             self._compute_distance_fields()  # into self.images
         if self.log_granular_time:
             self.timings["compute_distance_fields"] = time.perf_counter() - s_time
@@ -554,7 +580,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # collecting data into big tensors
             edges_padded.append(self.images[image_name]["edges_padded"])
             pad_masks.append(self.images[image_name]["pad_mask"])
-            if self.residual_type == "dtf":
+            if self.residual_type == "dtf" or self.dtf_source_count:
                 dt_fields.append(self.images[image_name]["dt_field"])
             images_shapes.append(torch.tensor(self.images[image_name]["hw"]))
             sampled_depth.append(self.images[image_name]["sampled_depth"])
@@ -1627,8 +1653,14 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
                 source_ids = batch["xyz_indices"]
                 target_ids = dt_indices
+                # Extra detected edges are reserved for DTF, not depth consistency.
+                depth_source_masks = pad_masks[source_ids]
+                if self.dtf_source_count:
+                    depth_source_masks = depth_source_masks & (
+                        torch.arange(pad_masks.shape[1], device=self.device) < self.uniform_source_count
+                    )
                 residuals, valid_mask = sampled_depth_residuals(
-                    batch["xyz_world"][source_ids], pad_masks[source_ids],
+                    batch["xyz_world"][source_ids], depth_source_masks,
                     self.current_target_depths[target_ids],
                     self.sampled_depth.target_valid_masks[target_ids],
                     self.depth_bank_transform[target_ids] @ batch["K1"], batch["P1"],

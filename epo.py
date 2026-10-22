@@ -953,6 +953,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 # Handle Rerun API variations
                 if hasattr(rr, "set_time_sequence"):
                     rr.set_time_sequence("step", step)
+                else:
+                    rr.set_time("step", sequence=step)
 
                 self.to_colmap(
                     opt,

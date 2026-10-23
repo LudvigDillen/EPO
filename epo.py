@@ -248,6 +248,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         joint_from_start=False,
         depth_normal_weight=0.0,
         combined_loss=False,
+        epo_loss_weight=0.0,
         depth_normal_weight_schedule="constant",
         depth_normal_max_relative_jump=0.15,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
@@ -279,6 +280,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if not 0 < depth_residual_threshold < 2:
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
+        if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
+            raise ValueError("epo_loss_weight must be finite and non-negative")
+        self.epo_loss_weight = epo_loss_weight
+        combined_loss = combined_loss or epo_loss_weight > 0
         if combined_loss and (
             residual_type != "depth" or source_sampling != "uniform"
         ):
@@ -724,6 +729,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.loss_list = []
         self.depth_loss_list = []  # Unweighted data term (depth or DTF).
         self.normal_loss_list = []  # Unweighted normal term; zero when disabled.
+        self.epo_loss_list = []  # Unweighted DTF term in combined mode.
         self.residuals = {}
         self.lr_list = {"R": [], "t": [], "mlp": [], "k": [], "z": []}
         self.auc_list = {"auc": {th: [] for th in self.auc_th}, "steps": []}
@@ -907,7 +913,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         past_poses = self.poses.get_all_matrices().detach().clone()
 
         # Fixed-lag async per-step stats: each step enqueues its
-        # (loss, err_q, err_t, err_c, data_loss, normal_loss) as a non-blocking D2H copy into a pinned
+        # Loss components and pose changes as a non-blocking D2H copy into a pinned
         # double buffer and consumes the PREVIOUS step's values. This
         # replaces the per-step hard sync (.tolist()) with an event wait
         # that is one step behind — the host runs a full iteration ahead
@@ -916,7 +922,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # one step later than with the synchronous read — an intentional,
         # bounded semantics change.
         _stats_pinned = [
-            torch.empty(6, dtype=self.dtype, pin_memory=True) for _ in range(2)
+            torch.empty(7, dtype=self.dtype, pin_memory=True) for _ in range(2)
         ]
         _stats_events = [torch.cuda.Event(), torch.cuda.Event()]
         _stats_pending = False  # becomes True after the first enqueue
@@ -1006,6 +1012,16 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             depth_loss = self.compute_batched_loss(residuals, sampled_viewgraphs, debug=debug)
             normal_loss = depth_loss.new_zeros(())
             loss = depth_loss
+            epo_loss = depth_loss.new_zeros(())
+            if self.epo_loss_weight > 0:
+                # Reuse the exact selected pairs and the geometry/MLP evaluated above.
+                edge_residuals, _ = self.compute_forward_step(
+                    torch.cat(sampled_viewgraphs), batch_size=batch_size, drop_last=False,
+                    huber_delta=huber_delta, clamp_start=clamp_start, clamp_end=clamp_end,
+                    step=step, objective="dtf",
+                )
+                epo_loss = self.compute_batched_loss(edge_residuals, debug=debug)
+                loss = loss + self.epo_loss_weight * epo_loss
             if self.depth_normal_prior is not None:
                 normal_loss = self.depth_normal_prior(self.current_target_depths)
                 normal_weight = normal_loss_weight(
@@ -1110,7 +1126,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             slot = step % 2
             _stats_pinned[slot].copy_(
                 torch.cat([loss_det.reshape(1), err_qt,
-                           depth_loss.detach().reshape(1), normal_loss.detach().reshape(1)]),
+                           depth_loss.detach().reshape(1), normal_loss.detach().reshape(1),
+                           epo_loss.detach().reshape(1)]),
                 non_blocking=True,
             )
             _stats_events[slot].record()
@@ -1123,10 +1140,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             if _stats_pending:
                 prev = 1 - slot
                 _stats_events[prev].synchronize()
-                loss_val, err_q, err_t, err_c, depth_val, normal_val = _stats_pinned[prev].tolist()
+                loss_val, err_q, err_t, err_c, depth_val, normal_val, epo_val = _stats_pinned[prev].tolist()
                 self.loss_list.append(loss_val)
                 self.depth_loss_list.append(depth_val)
                 self.normal_loss_list.append(normal_val)
+                self.epo_loss_list.append(epo_val)
                 max_err = max(err_q, err_t)
                 if self.verbose:
                     self.changes["q"].append(err_q)
@@ -1232,10 +1250,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if _stats_pending:
             slot = step % 2
             _stats_events[slot].synchronize()
-            loss_val, err_q, err_t, err_c, depth_val, normal_val = _stats_pinned[slot].tolist()
+            loss_val, err_q, err_t, err_c, depth_val, normal_val, epo_val = _stats_pinned[slot].tolist()
             self.loss_list.append(loss_val)
             self.depth_loss_list.append(depth_val)
             self.normal_loss_list.append(normal_val)
+            self.epo_loss_list.append(epo_val)
             if self.verbose:
                 self.changes["q"].append(err_q)
                 self.changes["t"].append(err_t)
@@ -1572,6 +1591,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         clamp_warmup_iters=1000,
         step=None,
         robust=True,
+        objective=None,
     ):
         """Compute one optimization step over the sampled_viewgraph in a batched manner and return the loss.
 
@@ -1587,7 +1607,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         (Eq. (8)) — i.e. a true pixel reprojection error, directly comparable to
         the L2 reprojection error reported for BA. Used by ``compute_mre`` for
         reporting; the optimization loop always calls with ``robust=True``.
+
+        ``objective`` overrides the residual type without changing geometry or
+        sampling; combined training uses it to evaluate DTF on the same pairs.
         """
+        residual_type = self.residual_type if objective is None else objective
+        if residual_type not in ("depth", "dtf"):
+            raise ValueError("objective must be 'depth' or 'dtf'")
         if step is None or step >= clamp_warmup_iters:
             clamp_max = clamp_end
         else:
@@ -1640,6 +1666,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             batch, pad_masks, dt_fields_src, dt_indices = self.create_batched_inputs(
                 sampled_viewgraph
             )
+            if self.dtf_source_count and (residual_type == "dtf" or not robust):
+                # Only detected edges enter DTF; uniform samples remain depth-only.
+                pad_masks = pad_masks & (
+                    torch.arange(pad_masks.shape[1], device=self.device) >= self.uniform_source_count
+                )
             self._sync_for_timing()
             if self.log_granular_time:
                 self.timings["prepare_batched_inputs"] += time.perf_counter() - s_time
@@ -1648,7 +1679,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             s_time = time.perf_counter()
 
             # projection and sampling
-            if robust and self.residual_type == "depth":
+            if robust and residual_type == "depth":
                 from losses.depth_loss import sampled_depth_residuals
 
                 source_ids = batch["xyz_indices"]

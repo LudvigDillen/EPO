@@ -448,6 +448,8 @@ class ReconstructAndVizModule:
             "list_loss": self.loss_list,
             "list_depth_loss": self.depth_loss_list,
             "list_normal_loss": self.normal_loss_list,  # Before multiplying by depth_normal_weight.
+            "list_epo_loss": self.epo_loss_list,  # Before multiplying by epo_loss_weight.
+            "epo_loss_weight": self.epo_loss_weight,
             "list_lr": self.lr_list,
             "auc_saving_freq": self.auc_saving_freq,
             "list_auc": self.auc_list,

@@ -20,16 +20,19 @@ def test_runner_normal_options():
     for method, weight, schedule in (("ours", "0.0", "constant"),
                                     ("ours", "0.01", "linear"), ("EPO", "0.01", "linear")):
         env = dict(os.environ, METHOD=method, DEPTH_NORMAL_WEIGHT=weight,
+                   EPO_LOSS_WEIGHT="0.01",
                    DEPTH_NORMAL_WEIGHT_SCHEDULE=schedule,
                    DEPTH_NORMAL_MAX_RELATIVE_JUMP="0.15", VIS="false")
         result = subprocess.run(["bash", "-c", command], cwd=root, env=env,
                                 capture_output=True, text=True, check=True)
         if method == "ours":
+            assert "--epo-loss-weight 0.01" in result.stdout
             assert f"--depth-normal-weight {weight}" in result.stdout
             assert f"--depth-normal-weight-schedule {schedule}" in result.stdout
             assert "--depth-normal-max-relative-jump 0.15" in result.stdout
         else:
             assert "--depth-normal" not in result.stdout
+            assert "--epo-loss-weight" not in result.stdout
 
 
 def test_runner_depth_learning_rate():

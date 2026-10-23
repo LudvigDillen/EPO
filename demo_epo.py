@@ -144,6 +144,8 @@ def main():
         help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
     )
     parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
+    parser.add_argument("--epo-loss-weight", type=float, default=0.0,
+                        help="Add EPO DTF loss on detected edges to uniform MLP depth supervision (0 disables)")
     parser.add_argument("--depth-learning-rate", type=float, default=3e-3,
                         help="Base learning rate for depth correction (MLP or affine); keeps EPO's scheduler")
     parser.add_argument("--depth-normal-weight", type=float, default=0.0,
@@ -200,6 +202,7 @@ def main():
         max_num_iterations=args.max_iterations,
         joint_from_start=args.joint_from_start,
         depth_parameterization=args.depth_parameterization,
+        epo_loss_weight=args.epo_loss_weight,
         z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,
         depth_residual_threshold=args.depth_residual_threshold,

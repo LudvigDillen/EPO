@@ -55,6 +55,29 @@ def test_extra_dtf_sources_are_excluded_from_depth_loss():
     assert masks[:, :1].all() and not masks[:, 1:].any()
 
 
+def test_combined_dtf_reuses_existing_loss_and_backpropagates():
+    state, k, poses = make_state()
+    state.dtf_source_count = state.uniform_source_count = 1
+    state.device = "cpu"
+    with torch.no_grad():
+        poses[1, 0, 3] = 0.1  # Nonzero baseline makes edge projections depend on depth.
+    state.dt_fields.params = torch.arange(9.).reshape(1, 1, 3, 3).repeat(2, 1, 1, 1)
+    state.edges_3D = SimpleNamespace(params=GeometryHead(state)()[2])
+    pairs = torch.tensor([[0, 1, 0, 1]])
+    depth, _ = EPO.compute_forward_step(state, pairs)
+    edge, selected = EPO.compute_forward_step(state, pairs, objective="dtf")
+    assert torch.equal(selected[0], pairs)
+    state.residual_type = "dtf"
+    reference, _ = EPO.compute_forward_step(state, pairs)
+    torch.testing.assert_close(edge, reference)
+    for term in (depth, edge):
+        grads = torch.autograd.grad(term.sum(), (k, poses, state.sampled_depth.model.biases[-1]),
+                                    retain_graph=True)
+        assert all(torch.isfinite(g).all() and g.abs().sum() > 0 for g in grads)
+    (depth.mean() + 0.01 * edge.mean()).backward()
+    assert torch.isfinite(k.grad).all() and torch.isfinite(poses.grad).all()
+
+
 def test_depth_objective_wiring_and_dtf_reporting():
     state, k, poses = make_state()
     output = GeometryHead(state)()

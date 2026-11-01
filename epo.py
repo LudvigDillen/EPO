@@ -19,6 +19,7 @@ import os
 import time
 import warnings
 from itertools import combinations
+from pathlib import Path
 
 import numpy as np
 import pycolmap
@@ -134,8 +135,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         R_lr, t_lr: Learning rates for raw rotation / translation parameters.
         k_lr: Learning rate for camera intrinsics.
         z_lr: Learning rate for the selected depth correction.
-        depth_parameterization: ``"affine"`` (existing per-edge scale/shift)
-            or ``"point-mlp"`` (shared sc3r camera-space XYZ MLP).
+        depth_parameterization: ``"affine"`` (existing per-edge scale/shift),
+            ``"point-mlp"`` (shared sc3r camera-space XYZ MLP) or
+            ``"vggt-features"`` (per-image linear log-depth correction in the
+            span of VGGT-Omega's depth-head features, read from
+            ``features.pth`` next to ``depths.pth``).
+        depth_feature_rank: Maximum whitened feature directions per image for
+            ``"vggt-features"``.
         mlp_pose_lr: Learning rate for the pose-refinement MLP and its
             translation offset.
         grad_R, grad_t: Whether to optimize raw rotation matrices /
@@ -237,6 +243,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         reprojection_error=3,
         run_mode="inference",  # or "debug" for deterministic results and more logging
         depth_parameterization="affine",
+        depth_feature_rank=256,
         residual_type="dtf",
         depth_residual_threshold=0.1,
         source_sampling="edges",
@@ -265,11 +272,15 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError(
                 f"camera_model must be one of {CAMERA_MODELS}, got {camera_model!r}"
             )
-        if depth_parameterization not in ("affine", "point-mlp"):
+        if depth_parameterization not in ("affine", "point-mlp", "vggt-features"):
             raise ValueError(
-                "depth_parameterization must be 'affine' or 'point-mlp', "
+                "depth_parameterization must be 'affine', 'point-mlp' or 'vggt-features', "
                 f"got {depth_parameterization!r}"
             )
+        if depth_parameterization == "vggt-features" and (
+            _ff_data is not None or depths_path is None or load_with_pad
+        ):
+            raise ValueError("vggt-features needs depths_path (with features.pth) and load_with_pad=False")
         self.device = device
         if residual_type not in ("dtf", "depth"):
             raise ValueError("residual_type must be 'dtf' or 'depth'")
@@ -451,6 +462,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.k_lr = k_lr
         self.z_lr = z_lr
         self.depth_parameterization = depth_parameterization
+        self.depth_feature_rank = depth_feature_rank
         self.mlp_pose_lr = mlp_pose_lr
         self.grad_R = grad_R
         self.grad_t = grad_t
@@ -647,6 +659,24 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 self.depth_bank_transform = (
                     self.sampled_depth.target_intrinsics @ torch.linalg.inv(intrinsics)
                 ).detach()  # [N,3,3]
+        elif self.depth_parameterization == "vggt-features":
+            from modules.feature_depth import FeatureDepthModule, load_letterboxed_features
+
+            image_names = sorted(self.images)
+            depths_dir = Path(self.depths_path)
+            depths_dir = depths_dir if depths_dir.is_dir() else depths_dir.parent
+            image_hws = [tuple(self.images[n]["hw"]) for n in image_names]
+            self.sampled_depth = FeatureDepthModule(
+                **depth_kwargs,
+                pixels=edges_padded,
+                valid_masks=pad_masks,
+                image_hws=torch.tensor(image_hws),
+                features=load_letterboxed_features(
+                    depths_dir / "features.pth", image_names, image_hws, device=self.device
+                ),
+                rank=self.depth_feature_rank,
+            )
+            print(f"Depth: {self.sampled_depth!r}")
         else:
             self.sampled_depth = DepthModule(**depth_kwargs)
 

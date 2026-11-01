@@ -87,8 +87,13 @@ def main():
     )
     parser.add_argument(
         "--depth_parameterization", "--depth-parameterization",
-        choices=("affine", "point-mlp"), default="affine",
-        help="Depth correction in EPO; affine preserves the existing per-edge baseline.",
+        choices=("affine", "point-mlp", "vggt-features"), default="affine",
+        help="Depth correction in EPO; affine preserves the existing per-edge baseline. "
+        "vggt-features needs --model_output with features.pth (VGGT-Omega, save_features).",
+    )
+    parser.add_argument(
+        "--depth-feature-rank", type=int, default=256,
+        help="Maximum whitened feature directions per image for vggt-features.",
     )
     parser.add_argument(
         "--early_stop",
@@ -202,6 +207,7 @@ def main():
         max_num_iterations=args.max_iterations,
         joint_from_start=args.joint_from_start,
         depth_parameterization=args.depth_parameterization,
+        depth_feature_rank=args.depth_feature_rank,
         epo_loss_weight=args.epo_loss_weight,
         z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,

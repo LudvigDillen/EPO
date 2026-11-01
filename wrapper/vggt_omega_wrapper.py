@@ -96,6 +96,9 @@ class VGGTOmegaWrapper(BaseWrapper):
         # Fixed resolutions (VGGT-Omega-1B-512 native resolution, patch 16).
         self.vggt_fixed_resolution = 512
         self.img_load_resolution = 768
+        # Set per forward() call; _run_vggt then keeps the depth-head inputs.
+        self._capture_features = False
+        self.head_features = None
 
         print(f"VGGTOmegaWrapper initialized on {self.device}")
 
@@ -138,8 +141,22 @@ class VGGTOmegaWrapper(BaseWrapper):
             align_corners=False,
         )
 
-        with torch.no_grad():
-            predictions = self.model(images_resized)
+        # The depth head ends in a 1x1 conv (``dense_head.proj``); its input is
+        # what the vggt-features depth parameterization re-weights. The head runs
+        # in chunks of frames, so the hook sees one call per chunk, in order.
+        head_inputs = []
+        hook = None
+        if self._capture_features:
+            hook = self.model.dense_head.proj.register_forward_hook(
+                lambda module, inputs, output: head_inputs.append(inputs[0].half().cpu())
+            )
+        try:
+            with torch.no_grad():
+                predictions = self.model(images_resized)
+        finally:
+            if hook is not None:
+                hook.remove()
+        self.head_features = torch.cat(head_inputs) if head_inputs else None
 
         extrinsic, intrinsic = encoding_to_camera(
             predictions["pose_enc"], images_resized.shape[-2:]
@@ -194,6 +211,7 @@ class VGGTOmegaWrapper(BaseWrapper):
         # Non-BA parameters
         conf_thres_value: float = 2.5,
         max_points_for_colmap: int = 100_000,
+        save_features: bool = False,
     ):
         """Run VGGT-Omega reconstruction on images and save results.
 
@@ -220,6 +238,10 @@ class VGGTOmegaWrapper(BaseWrapper):
             fine_tracking: Unused (BA-only).
             conf_thres_value: Confidence threshold for depth filtering.
             max_points_for_colmap: Maximum 3D points for COLMAP.
+            save_features: Also write ``features.pth`` (with ``save`` and
+                ``save_depth``): image stem -> float16 ``[256, h, w]`` input of
+                the depth head's last layer, on the square letterboxed grid at a
+                quarter of the network resolution.
 
         Raises:
             NotImplementedError: If ``use_ba`` is True.
@@ -280,6 +302,7 @@ class VGGTOmegaWrapper(BaseWrapper):
         # Run VGGT-Omega.
         print("Running VGGT-Omega model...")
         t_start = time.time()
+        self._capture_features = save_features
         extrinsic, intrinsic, depth_map, depth_conf = self._run_vggt(images)
         points_3d = self._unproject_depth_map_to_point_map(
             depth_map, extrinsic, intrinsic
@@ -352,6 +375,12 @@ class VGGTOmegaWrapper(BaseWrapper):
                 if save_depth:
                     print("Saving depth maps...")
                     torch.save(depths, os.path.join(output_path, "depths.pth"))
+                    if save_features:
+                        features = {
+                            Path(img_path).with_suffix("").as_posix(): self.head_features[i]
+                            for i, img_path in enumerate(base_image_paths)
+                        }
+                        torch.save(features, os.path.join(output_path, "features.pth"))
 
             timings["save_reconstruction"] = time.time() - t_start
 

@@ -96,6 +96,11 @@ def main():
         help="Maximum whitened feature directions per image for vggt-features.",
     )
     parser.add_argument(
+        "--depth-feature-variance-fraction", type=float, default=1.0,
+        help="vggt-features: per image, keep only the leading whitened directions that "
+        "explain this fraction of the feature variance (e.g. 0.95); 1 keeps all.",
+    )
+    parser.add_argument(
         "--early_stop",
         type=str,
         default="pose",
@@ -208,6 +213,7 @@ def main():
         joint_from_start=args.joint_from_start,
         depth_parameterization=args.depth_parameterization,
         depth_feature_rank=args.depth_feature_rank,
+        depth_feature_variance_fraction=args.depth_feature_variance_fraction,
         epo_loss_weight=args.epo_loss_weight,
         z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,

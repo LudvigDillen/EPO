@@ -142,6 +142,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             ``features.pth`` next to ``depths.pth``).
         depth_feature_rank: Maximum whitened feature directions per image for
             ``"vggt-features"``.
+        depth_feature_variance_fraction: Below 1, keep per image only the leading
+            whitened directions that explain this fraction of the feature variance.
         mlp_pose_lr: Learning rate for the pose-refinement MLP and its
             translation offset.
         grad_R, grad_t: Whether to optimize raw rotation matrices /
@@ -244,6 +246,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         run_mode="inference",  # or "debug" for deterministic results and more logging
         depth_parameterization="affine",
         depth_feature_rank=256,
+        depth_feature_variance_fraction=1.0,
         residual_type="dtf",
         depth_residual_threshold=0.1,
         source_sampling="edges",
@@ -281,6 +284,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             _ff_data is not None or depths_path is None or load_with_pad
         ):
             raise ValueError("vggt-features needs depths_path (with features.pth) and load_with_pad=False")
+        if not 0 < depth_feature_variance_fraction <= 1:
+            raise ValueError("depth_feature_variance_fraction must be in (0, 1]")
         self.device = device
         if residual_type not in ("dtf", "depth"):
             raise ValueError("residual_type must be 'dtf' or 'depth'")
@@ -463,6 +468,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.z_lr = z_lr
         self.depth_parameterization = depth_parameterization
         self.depth_feature_rank = depth_feature_rank
+        self.depth_feature_variance_fraction = depth_feature_variance_fraction
         self.mlp_pose_lr = mlp_pose_lr
         self.grad_R = grad_R
         self.grad_t = grad_t
@@ -675,6 +681,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                     depths_dir / "features.pth", image_names, image_hws, device=self.device
                 ),
                 rank=self.depth_feature_rank,
+                variance_fraction=self.depth_feature_variance_fraction,
             )
             print(f"Depth: {self.sampled_depth!r}")
         else:

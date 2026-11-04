@@ -56,6 +56,7 @@ class FeatureDepthModule(BaseModule):
         features: list[torch.Tensor],
         rank: int = 256,
         eigenvalue_floor: float = 1e-6,
+        variance_fraction: float = 1.0,
         lr: float = 3e-3,
         grad: bool = True,
         warmup_steps: int = 25,
@@ -81,7 +82,8 @@ class FeatureDepthModule(BaseModule):
         self.register_buffer("valid_masks", valid)
         self.register_buffer("sample_grid", grid[:, :, None])  # [N,P,1,2]
         self.model = PerImageFeatureDepth(
-            [whiten_features(f, rank, eigenvalue_floor) for f in features]
+            [whiten_features(f, rank, eigenvalue_floor, variance_fraction=variance_fraction)
+             for f in features]
         ).to(self.device)
         self.model.requires_grad_(grad)
         if grad:
@@ -115,6 +117,6 @@ class FeatureDepthModule(BaseModule):
         return self.get_parameters(None)
 
     def __repr__(self):
-        ranks = self.model.retained_ranks
+        ranks = sorted(self.model.retained_ranks)
         return (f"FeatureDepthModule(images={len(ranks)}, retained directions "
-                f"min/max {min(ranks)}/{max(ranks)})")
+                f"min/median/max {ranks[0]}/{ranks[len(ranks) // 2]}/{ranks[-1]})")

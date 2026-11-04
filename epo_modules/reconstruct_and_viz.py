@@ -478,6 +478,8 @@ class ReconstructAndVizModule:
             "grad_k": self.grad_k,
             "grad_z": self.grad_z,
             "depth_parameterization": self.depth_parameterization,
+            "depth_feature_rank": self.depth_feature_rank,
+            "depth_feature_variance_fraction": self.depth_feature_variance_fraction,
             "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
             "depth_normal_weight": self.depth_normal_weight,
@@ -497,6 +499,10 @@ class ReconstructAndVizModule:
             "lr_t": self.t_lr,
             "matcher_type": self.matcher_type,
         }
+        if self.depth_parameterization == "vggt-features":
+            training_logs["depth_feature_retained_ranks"] = list(
+                self.sampled_depth.model.retained_ranks
+            )
         if hasattr(self, "mre"):
             training_logs["observations"] = self.pad_masks.params.sum().item()
             training_logs["mean_reproj_error"] = self.mre.mean().item()

@@ -6,7 +6,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from depth_refinement.optimization.features import PerImageFeatureDepth, whiten_features
+from depth_refinement.optimization.features import (
+    PerImageFeatureDepth, resample_correction, whiten_features,
+)
+from depth_refinement.optimization.residuals import downsample_depth_bank
 from modules.base_module import BaseModule
 
 
@@ -44,7 +47,12 @@ def load_letterboxed_features(path, image_names, image_hws, device="cuda"):
 
 
 class FeatureDepthModule(BaseModule):
-    """Per-image ``log d = log d_0 + beta^T z + log_scale`` evaluated at EPO's edge pixels."""
+    """Per-image ``log d = log d_0 + beta^T z + log_scale`` evaluated at EPO's edge pixels.
+
+    With ``target_depths`` (depth residuals), the same correction also refines a
+    fixed low-resolution bank of each whole depth map, which the residuals sample
+    at projected source points; the interface matches ``PointMLPDepthModule``.
+    """
 
     def __init__(
         self,
@@ -63,6 +71,10 @@ class FeatureDepthModule(BaseModule):
         max_num_iterations: int = 1000,
         device: str = "cuda",
         dtype: torch.dtype = torch.float32,
+        target_depths: torch.Tensor | None = None,
+        intrinsics: torch.Tensor | None = None,
+        target_valid_masks: torch.Tensor | None = None,
+        target_max_resolution: int = 128,
     ):
         super().__init__(image_id_map, device=device, dtype=dtype)
         depth = torch.as_tensor(depth, device=self.device, dtype=dtype).detach()
@@ -81,6 +93,27 @@ class FeatureDepthModule(BaseModule):
         self.register_buffer("depth", depth)
         self.register_buffer("valid_masks", valid)
         self.register_buffer("sample_grid", grid[:, :, None])  # [N,P,1,2]
+        self.edge_count = depth.shape[1]
+        self.target_size = None
+        if target_depths is not None:
+            targets = torch.as_tensor(target_depths, device=self.device, dtype=dtype).detach()
+            if targets.ndim != 3 or targets.shape[0] != depth.shape[0] or intrinsics is None:
+                raise ValueError("Target depths must be [N,H,W] and come with intrinsics [N,3,3]")
+            if target_max_resolution < 1:
+                raise ValueError("target_max_resolution must be positive")
+            intrinsics = torch.as_tensor(intrinsics, device=self.device, dtype=dtype).detach()
+            height, width = targets.shape[-2:]
+            factor = min(1.0, target_max_resolution / max(height, width))
+            self.target_size = (max(1, round(height * factor)), max(1, round(width * factor)))
+            bank = downsample_depth_bank(
+                targets, intrinsics, valid_masks=target_valid_masks, output_size=self.target_size
+            )
+            self.register_buffer("target_intrinsics", bank.intrinsics.detach())
+            self.register_buffer("target_valid_masks", bank.valid_masks)
+            target_bank = torch.where(bank.valid_masks, bank.depths, 0)  # [N,Ht,Wt]
+            self.register_buffer("target_bank", target_bank)
+            # Same layout as PointMLPDepthModule: edge depths, then the flattened bank.
+            self.register_buffer("query_depth", torch.cat((depth, target_bank.flatten(1)), dim=1))
         self.model = PerImageFeatureDepth(
             [whiten_features(f, rank, eigenvalue_floor, variance_fraction=variance_fraction)
              for f in features]
@@ -100,18 +133,32 @@ class FeatureDepthModule(BaseModule):
 
     def get_parameters(self, ids):
         """Return corrected edge depths in EPO's [N,P] layout."""
+        return self.get_depths_and_target_bank(ids)[0]
+
+    def get_depths_and_target_bank(self, ids=None):
+        """Return corrected edge depths [B,P] and, with a target bank, its maps [B,Ht,Wt]."""
         base, grid, valid = self.depth, self.sample_grid, self.valid_masks
         corrections = self.model.log_corrections()  # [N,h,w]
+        targets = getattr(self, "target_bank", None)
+        target_valid = getattr(self, "target_valid_masks", None)
         if ids is not None:
             indices = self.map_names_to_indices(ids) if isinstance(ids[0], str) else ids
             indices = torch.as_tensor(indices, device=self.device, dtype=torch.long)
             base, grid, valid = base[indices], grid[indices], valid[indices]
             corrections = corrections[indices]
+            if targets is not None:
+                targets, target_valid = targets[indices], target_valid[indices]
         log_correction = F.grid_sample(
             corrections[:, None], grid, mode="bilinear", padding_mode="border",
             align_corners=False,
         )[:, 0, :, 0]  # [B,P]
-        return torch.where(valid, base * torch.exp(log_correction), base)
+        edges = torch.where(valid, base * torch.exp(log_correction), base)
+        if targets is None:
+            return edges, None
+        # The feature grid spans the whole image, as does the bank, so this is the
+        # same resampling depth_refinement applies to its own depth banks.
+        bank_correction = resample_correction(corrections, self.target_size)  # [B,Ht,Wt]
+        return edges, torch.where(target_valid, targets * torch.exp(bank_correction), targets)
 
     def get_all_parameters(self):
         return self.get_parameters(None)

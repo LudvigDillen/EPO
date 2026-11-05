@@ -165,7 +165,7 @@ def main():
     )
     parser.add_argument(
         "--residual-type", choices=("dtf", "depth"), default="dtf",
-        help="Training objective; depth requires point-mlp and SIMPLE_PINHOLE.",
+        help="Training objective; depth requires point-mlp or vggt-features and SIMPLE_PINHOLE.",
     )
     parser.add_argument("--depth-residual-threshold", type=float, default=0.02)
     parser.add_argument("--epo-loss-weight", type=float, default=0.0,
@@ -187,6 +187,9 @@ def main():
         help="Source points for depth residuals; uniform covers the valid image grid.",
     )
     parser.add_argument("--uniform-samples-per-image", type=int, default=12288)
+    parser.add_argument("--depth-target-resolution", type=int, default=128,
+                        help="Long side of the target depth banks that depth residuals sample "
+                             "and the normal term runs on")
     parser.add_argument("--extract-edges-for-visualization", action="store_true",
                         help="Also extract edge maps in uniform runs; never used by the depth loss.")
     parser.add_argument("--visualize", action=argparse.BooleanOptionalAction, default=False,
@@ -240,6 +243,7 @@ def main():
         depth_graduated_threshold_end=args.depth_graduated_threshold_end,
         source_sampling=args.source_sampling,
         uniform_samples_per_image=args.uniform_samples_per_image,
+        depth_target_resolution=args.depth_target_resolution,
         extract_edges_for_visualization=args.extract_edges_for_visualization,
         single_camera_per_folder=True,  # share one camera across all "<cam_id>/..." images.
         verbose=False,

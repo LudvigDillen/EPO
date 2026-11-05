@@ -22,7 +22,7 @@ def make_state(device="cpu"):
     )
     state = SimpleNamespace(
         residual_type="depth", depth_residual_threshold=0.1, depth_graduated_nonconvexity=False,
-        dtf_source_count=0,
+        dtf_source_count=0, uniform_source_count=depths.shape[1],
         sampled_depth=module,
         poses=SimpleNamespace(poses=None, get_projection_matrix=lambda ids: poses if ids is None else poses[ids]),
         intrinsics=SimpleNamespace(cameras=None, get_intrinsic_matrix=lambda ids: k if ids is None else k[ids],
@@ -51,8 +51,9 @@ def test_extra_dtf_sources_are_excluded_from_depth_loss():
     state.edges_3D = SimpleNamespace(params=GeometryHead(state)()[2])
     with patch("losses.depth_loss.sampled_depth_residuals", wraps=sampled_depth_residuals) as residuals:
         EPO.compute_forward_step(state, torch.tensor([[0, 1, 0, 1]]))
-    masks = residuals.call_args.args[1]
-    assert masks[:, :1].all() and not masks[:, 1:].any()
+    # Only the uniform sources (the first uniform_source_count) reach the depth term.
+    points, masks = residuals.call_args.args[:2]
+    assert points.shape[1] == masks.shape[1] == 1 and masks.all()
 
 
 def test_combined_dtf_reuses_existing_loss_and_backpropagates():

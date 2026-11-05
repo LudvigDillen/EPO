@@ -487,6 +487,7 @@ class ReconstructAndVizModule:
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,
             "source_sampling": self.source_sampling,
             "uniform_samples_per_image": self.uniform_samples_per_image,
+            "depth_target_resolution": self.depth_target_resolution,
             "depth_residual_threshold": self.depth_residual_threshold,
             "depth_graduated_nonconvexity": self.depth_graduated_nonconvexity,
             "depth_graduated_threshold_start": self.depth_graduated_threshold_start,

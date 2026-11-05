@@ -251,6 +251,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
+        depth_target_resolution=128,
         extract_edges_for_visualization=False,
         depth_graduated_nonconvexity=False,
         depth_graduated_threshold_start=0.05,
@@ -290,9 +291,12 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if residual_type not in ("dtf", "depth"):
             raise ValueError("residual_type must be 'dtf' or 'depth'")
         if residual_type == "depth" and (
-            depth_parameterization != "point-mlp" or camera_model != "SIMPLE_PINHOLE"
+            depth_parameterization not in ("point-mlp", "vggt-features")
+            or camera_model != "SIMPLE_PINHOLE"
         ):
-            raise ValueError("Depth residuals require point-mlp and SIMPLE_PINHOLE cameras")
+            raise ValueError(
+                "Depth residuals require point-mlp or vggt-features and SIMPLE_PINHOLE cameras"
+            )
         if not 0 < depth_residual_threshold < 2:
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
@@ -332,6 +336,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if uniform_samples_per_image < 1:
             raise ValueError("uniform_samples_per_image must be positive")
         self.uniform_samples_per_image = uniform_samples_per_image
+        if depth_target_resolution < 1:
+            raise ValueError("depth_target_resolution must be positive")
+        # Long side of the target depth banks (depth residual lookups, normal term).
+        self.depth_target_resolution = depth_target_resolution
         self.extract_edges_for_visualization = extract_edges_for_visualization
         self.dtype = torch.float32
 
@@ -640,9 +648,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             warmup_steps=self.warmup_steps,
             dtype=self.dtype,
         )
-        if self.depth_parameterization == "point-mlp":
-            from modules.point_mlp_depth import PointMLPDepthModule
-
+        if self.depth_parameterization in ("point-mlp", "vggt-features"):
             image_names = sorted(self.images)
             camera_indices = [
                 self.intrinsics.image_to_tensor_idx[self.images[name]["cam_id"]]
@@ -651,20 +657,20 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             intrinsics = self.intrinsics.get_intrinsic_matrix(
                 torch.tensor(camera_indices, device=self.device)
             ).detach()
+            target_depths = (torch.stack([self.images[n]["depth"] for n in image_names])
+                             if self.residual_type == "depth" else None)
+        if self.depth_parameterization == "point-mlp":
+            from modules.point_mlp_depth import PointMLPDepthModule
+
             self.sampled_depth = PointMLPDepthModule(
                 **depth_kwargs,
                 pixels=edges_padded,
                 intrinsics=intrinsics,
                 valid_masks=pad_masks,
                 random_seed=self.seed,
-                target_depths=(torch.stack([self.images[n]["depth"] for n in image_names])
-                               if self.residual_type == "depth" else None),
+                target_depths=target_depths,
+                target_max_resolution=self.depth_target_resolution,
             )
-            if self.residual_type == "depth":
-                # Fixed pixel-coordinate transform; apply it to LIVE K each step.
-                self.depth_bank_transform = (
-                    self.sampled_depth.target_intrinsics @ torch.linalg.inv(intrinsics)
-                ).detach()  # [N,3,3]
         elif self.depth_parameterization == "vggt-features":
             from modules.feature_depth import FeatureDepthModule, load_letterboxed_features
 
@@ -682,10 +688,18 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 ),
                 rank=self.depth_feature_rank,
                 variance_fraction=self.depth_feature_variance_fraction,
+                target_depths=target_depths,
+                intrinsics=intrinsics,
+                target_max_resolution=self.depth_target_resolution,
             )
             print(f"Depth: {self.sampled_depth!r}")
         else:
             self.sampled_depth = DepthModule(**depth_kwargs)
+        if self.residual_type == "depth":
+            # Fixed pixel-coordinate transform; apply it to LIVE K each step.
+            self.depth_bank_transform = (
+                self.sampled_depth.target_intrinsics @ torch.linalg.inv(intrinsics)
+            ).detach()  # [N,3,3]
 
         self.depth_normal_prior = None
         if self.depth_normal_weight > 0:

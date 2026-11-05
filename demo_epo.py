@@ -128,6 +128,20 @@ def main():
         "Any2Full and write a densified model to <output_path>/dense_<model>_epo.",
     )
     parser.add_argument(
+        "--save-dense-depth", action="store_true",
+        help="Write <output_path>/dense_depths.pth: the refined depth at every pixel of "
+        "EPO's working grid (helpers/dense_depth.py); affine is spread from its edges.",
+    )
+    parser.add_argument(
+        "--dense-depth-radius", type=float, default=50.0,
+        help="Affine dense export: pixels with no edge within this many working-grid "
+        "pixels keep the unrefined depth.",
+    )
+    parser.add_argument(
+        "--dense-depth-sigma", type=float, default=15.0,
+        help="Affine dense export: Gaussian width, in pixels, of the normalized convolution.",
+    )
+    parser.add_argument(
         "--densify_batch_size",
         type=int,
         default=4,
@@ -301,6 +315,13 @@ def main():
     )
     for _write in deferred_writes:
         _write()
+    if args.save_dense_depth:
+        from helpers.dense_depth import save_dense_depths
+
+        save_dense_depths(
+            epo, os.path.join(args.output_path, "dense_depths.pth"),
+            radius=args.dense_depth_radius, sigma=args.dense_depth_sigma,
+        )
 
     epo.print_summary()
 

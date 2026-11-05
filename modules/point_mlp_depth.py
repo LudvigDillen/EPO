@@ -50,6 +50,8 @@ class PointMLPDepthModule(BaseModule):
         valid = valid & torch.isfinite(points).all(-1) & torch.isfinite(depth) & (depth > 0)
         normalized, centers, scales = normalize_camera_points(points, valid)
         self.register_buffer("depth", depth)
+        # The intrinsics that define the fixed points, for evaluating the MLP densely.
+        self.register_buffer("source_intrinsics", intrinsics)
         self.register_buffer("normalized_points", normalized)
         self.register_buffer("valid_masks", valid)
         self.register_buffer("centers", centers)

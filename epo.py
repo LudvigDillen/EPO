@@ -1735,14 +1735,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
                 source_ids = batch["xyz_indices"]
                 target_ids = dt_indices
-                # Extra detected edges are reserved for DTF, not depth consistency.
-                depth_source_masks = pad_masks[source_ids]
-                if self.dtf_source_count:
-                    depth_source_masks = depth_source_masks & (
-                        torch.arange(pad_masks.shape[1], device=self.device) < self.uniform_source_count
-                    )
+                # Extra detected edges (appended after the uniform samples) are reserved
+                # for DTF, so the depth term only sees the uniform sources. Slicing before
+                # the per-pair gather keeps this pass proportional to the sample count
+                # instead of to the (much larger) padded edge count.
+                uniform = self.uniform_source_count
                 residuals, valid_mask = sampled_depth_residuals(
-                    batch["xyz_world"][source_ids], depth_source_masks,
+                    batch["xyz_world"][:, :uniform][source_ids], pad_masks[:, :uniform][source_ids],
                     self.current_target_depths[target_ids],
                     self.sampled_depth.target_valid_masks[target_ids],
                     self.depth_bank_transform[target_ids] @ batch["K1"], batch["P1"],

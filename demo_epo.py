@@ -205,6 +205,8 @@ def main():
                         help="Also open the native viewer when --visualize is enabled")
     parser.add_argument("--visualization-gt", default=None,
                         help="COLMAP GT cameras to overlay in green; visualization only")
+    parser.add_argument("--grad-z", action=argparse.BooleanOptionalAction, default=True,
+                        help="Optimize depth; --no-grad-z keeps the initial depths fixed")
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
                         help="Optimize depth jointly with poses/intrinsics from the first iteration")
     args = parser.parse_args()
@@ -231,6 +233,7 @@ def main():
         use_amp=True,
         max_num_iterations=args.max_iterations,
         joint_from_start=args.joint_from_start,
+        grad_z=args.grad_z,
         depth_parameterization=args.depth_parameterization,
         depth_feature_rank=args.depth_feature_rank,
         depth_feature_variance_fraction=args.depth_feature_variance_fraction,

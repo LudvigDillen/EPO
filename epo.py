@@ -248,6 +248,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_feature_rank=256,
         depth_feature_variance_fraction=1.0,
         residual_type="dtf",
+        optimizer="adam",
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -300,6 +301,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if not 0 < depth_residual_threshold < 2:
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
+        # "lm": Levenberg-Marquardt over poses and focal lengths on the edge objective,
+        # with depths fixed (depth_refinement.optimization.lm_cameras), instead of Adam.
+        if optimizer not in ("adam", "lm"):
+            raise ValueError("optimizer must be 'adam' or 'lm'")
+        if optimizer == "lm" and (residual_type != "dtf" or camera_model != "SIMPLE_PINHOLE"):
+            raise ValueError("optimizer='lm' supports the edge residual with SIMPLE_PINHOLE cameras")
+        self.optimizer = optimizer
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
         self.epo_loss_weight = epo_loss_weight
@@ -892,6 +900,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # fine too, but binding here makes the gating obvious where it matters.
         log_t = self.log_granular_time
 
+        if self.optimizer == "lm":
+            self._forward_lm(clamp_start=clamp_start, clamp_end=clamp_end,
+                             huber_delta=huber_delta)
+            return
+
         forward_start = time.perf_counter()
 
         if rerun_points_interval < 0 or rerun_max_points < 1:
@@ -1349,6 +1362,63 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.print_summary() if self.verbose else print("=" * 70, end="\n\n")
 
     ### Forward and backward helpers ###
+    def _forward_lm(self, clamp_start, clamp_end, huber_delta):
+        """Refine poses and focal lengths with Levenberg-Marquardt on EPO's edge objective.
+
+        Depths stay at their initial values. The objective, robustifier and clamp
+        schedule are EPO's (``depth_refinement.optimization.lm_cameras``); the result
+        is written back into the pose and camera modules, so the export is unchanged.
+        ``max_num_iterations`` is the number of LM iterations.
+        """
+        from depth_refinement.optimization.lm_cameras import (
+            CameraLmConfig,
+            levenberg_marquardt_edges,
+        )
+
+        self._sync()
+        start = time.perf_counter()
+        with torch.no_grad():
+            image_ids, camera_ids = self.images_cams_ids.unbind(1)
+            camera_index = torch.empty_like(image_ids)
+            camera_index[image_ids] = camera_ids  # camera of each image, in storage order
+            depths = self.sampled_depth.get_parameters(None).detach()
+            config = CameraLmConfig(
+                iterations=self.max_num_iterations, clamp_start=clamp_start,
+                clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
+            )
+            run = levenberg_marquardt_edges(
+                self.edges_padded.params, depths, self.pad_masks.params.bool(), camera_index,
+                self.intrinsics.get_intrinsic_matrix(None).detach(),
+                self.poses.get_all_matrices().detach(), self.dt_fields.params[:, 0],
+                self.images_hw.params, self.viewgraph_ids[:, :2], config,
+            )
+            self._write_back_cameras(run.world_to_camera, run.intrinsics)
+            self.unproject_edges_to_3D()
+        self._sync()
+        self.timings["total_optimization"] = time.perf_counter() - start
+        self.completed_iterations = run.iterations_completed
+        self.loss_list = list(run.costs)
+        self.compute_mre()
+        self.print_summary() if self.verbose else print("=" * 70, end="\n\n")
+
+    def _write_back_cameras(self, world_to_camera, intrinsics):
+        """Store LM's poses and intrinsics in the pose and camera modules (MLP off)."""
+        poses = self.poses
+        R, t = world_to_camera[:, :3, :3], world_to_camera[:, :3, 3]
+        poses.use_mlp = False
+        poses.R_param.data.copy_(R)
+        poses._R_orth = R.clone()  # already orthonormal; skip Gram-Schmidt
+        poses.t_param.data.copy_((t - poses.t_mean) / poses.t_scale)
+        poses.t_offset.data.zero_()
+        poses.update_all_matrices()
+        cameras = self.intrinsics
+        focal = intrinsics[:, 0, 0]
+        if cameras.direct_backprop:
+            cameras.params.data[:, 0] = focal
+        else:
+            cameras.params.data[:, 0] = focal / cameras.k_params[:, 0] - 1
+        cameras.update_all_matrices()
+
     def check_convergence(self, list_of_changes, early_stop, window, tol):
         """Evaluate convergence based on pose changes: max(delta_r, delta_t).
         Stop when smoothed max change is below tol for 'window' consecutive steps.

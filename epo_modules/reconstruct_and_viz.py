@@ -482,6 +482,7 @@ class ReconstructAndVizModule:
             "depth_feature_variance_fraction": self.depth_feature_variance_fraction,
             "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
+            "optimizer": self.optimizer,
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,

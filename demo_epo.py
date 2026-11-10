@@ -187,6 +187,9 @@ def main():
         help="Source points for depth residuals; uniform covers the valid image grid.",
     )
     parser.add_argument("--uniform-samples-per-image", type=int, default=12288)
+    parser.add_argument("--optimizer", choices=("adam", "lm"), default="adam",
+                        help="lm: Levenberg-Marquardt over poses and focal lengths on the edge "
+                             "objective with depths fixed (--max_iterations LM iterations)")
     parser.add_argument("--depth-target-resolution", type=int, default=128,
                         help="Long side of the target depth banks that depth residuals sample "
                              "and the normal term runs on")
@@ -234,6 +237,7 @@ def main():
         epo_loss_weight=args.epo_loss_weight,
         z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,
+        optimizer=args.optimizer,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,
         depth_normal_weight_schedule=args.depth_normal_weight_schedule,

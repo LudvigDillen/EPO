@@ -206,7 +206,10 @@ def main():
     parser.add_argument("--visualization-gt", default=None,
                         help="COLMAP GT cameras to overlay in green; visualization only")
     parser.add_argument("--lm-depth-start", type=float, default=0.5,
-                        help="LM with free depth: fraction of the iterations with depth fixed")
+                        help="LM with free depth: depth is fixed until the cameras converge, "
+                             "at most for this fraction of the iterations")
+    parser.add_argument("--lm-clamp-iterations", type=int, default=25,
+                        help="LM: iterations over which the residual clamp reaches its final value")
     parser.add_argument("--grad-z", action=argparse.BooleanOptionalAction, default=True,
                         help="Optimize depth; --no-grad-z keeps the initial depths fixed")
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
@@ -244,6 +247,7 @@ def main():
         residual_type=args.residual_type,
         optimizer=args.optimizer,
         lm_depth_start=args.lm_depth_start,
+        lm_clamp_iterations=args.lm_clamp_iterations,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,
         depth_normal_weight_schedule=args.depth_normal_weight_schedule,

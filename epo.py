@@ -250,6 +250,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         residual_type="dtf",
         optimizer="adam",
         lm_depth_start=0.5,
+        lm_clamp_iterations=25,
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -313,8 +314,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("optimizer='lm' optimizes depth only with the vggt-features "
                              "parameterization; pass grad_z=False to keep depths fixed")
         self.optimizer = optimizer
-        # LM with free depth: fraction of the iterations with depth fixed (cameras only).
+        # LM with free depth: depth is fixed (cameras only) until the cameras converge at the
+        # final clamp, and at the latest for this fraction of the iterations.
         self.lm_depth_start = float(lm_depth_start)
+        self.lm_clamp_iterations = int(lm_clamp_iterations)  # LM: iterations to the final clamp
+        self.lm_depth_free_iteration = None  # LM: first iteration with depth free (logged)
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
         self.epo_loss_weight = epo_loss_weight
@@ -1398,7 +1402,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             config = CameraLmConfig(
                 iterations=self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
-                depth_start=self.lm_depth_start,
+                depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
             )
             run = levenberg_marquardt_edges(
                 self.edges_padded.params, depths, self.pad_masks.params.bool(), camera_index,
@@ -1413,6 +1417,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self._sync()
         self.timings["total_optimization"] = time.perf_counter() - start
         self.completed_iterations = run.iterations_completed
+        self.lm_depth_free_iteration = run.depth_free_iteration
         self.loss_list = list(run.costs)
         self.compute_mre()
         self.print_summary() if self.verbose else print("=" * 70, end="\n\n")

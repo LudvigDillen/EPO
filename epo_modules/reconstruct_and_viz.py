@@ -484,6 +484,8 @@ class ReconstructAndVizModule:
             "residual_type": self.residual_type,
             "optimizer": self.optimizer,
             "lm_depth_start": self.lm_depth_start,
+            "lm_clamp_iterations": self.lm_clamp_iterations,
+            "lm_depth_free_iteration": self.lm_depth_free_iteration,
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,

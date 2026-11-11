@@ -301,12 +301,16 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         if not 0 < depth_residual_threshold < 2:
             raise ValueError("depth_residual_threshold must be in (0, 2)")
         self.residual_type = residual_type
-        # "lm": Levenberg-Marquardt over poses and focal lengths on the edge objective,
-        # with depths fixed (depth_refinement.optimization.lm_cameras), instead of Adam.
+        # "lm": Levenberg-Marquardt on the edge objective instead of Adam, over poses,
+        # focal lengths and, with grad_z, the vggt-features depth coefficients
+        # (depth_refinement.optimization.lm_cameras); grad_z=False keeps depths fixed.
         if optimizer not in ("adam", "lm"):
             raise ValueError("optimizer must be 'adam' or 'lm'")
         if optimizer == "lm" and (residual_type != "dtf" or camera_model != "SIMPLE_PINHOLE"):
             raise ValueError("optimizer='lm' supports the edge residual with SIMPLE_PINHOLE cameras")
+        if optimizer == "lm" and grad_z and depth_parameterization != "vggt-features":
+            raise ValueError("optimizer='lm' optimizes depth only with the vggt-features "
+                             "parameterization; pass grad_z=False to keep depths fixed")
         self.optimizer = optimizer
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
@@ -1363,12 +1367,14 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
     ### Forward and backward helpers ###
     def _forward_lm(self, clamp_start, clamp_end, huber_delta):
-        """Refine poses and focal lengths with Levenberg-Marquardt on EPO's edge objective.
+        """Refine poses, focal lengths and depths with Levenberg-Marquardt on EPO's edge objective.
 
-        Depths stay at their initial values. The objective, robustifier and clamp
-        schedule are EPO's (``depth_refinement.optimization.lm_cameras``); the result
-        is written back into the pose and camera modules, so the export is unchanged.
-        ``max_num_iterations`` is the number of LM iterations.
+        With ``grad_z`` the unknowns include the vggt-features coefficients (``beta`` and
+        ``log_scale`` per image), optimized jointly with the cameras from the first
+        iteration; otherwise depths stay at their initial values. The objective,
+        robustifier and clamp schedule are EPO's (``depth_refinement.optimization.lm_cameras``);
+        the result is written back into the pose, camera and depth modules, so the export
+        is unchanged. ``max_num_iterations`` is the number of LM iterations.
         """
         from depth_refinement.optimization.lm_cameras import (
             CameraLmConfig,
@@ -1381,7 +1387,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             image_ids, camera_ids = self.images_cams_ids.unbind(1)
             camera_index = torch.empty_like(image_ids)
             camera_index[image_ids] = camera_ids  # camera of each image, in storage order
-            depths = self.sampled_depth.get_parameters(None).detach()
+            depth_kwargs = {}
+            if self.grad_z:
+                depths, depth_kwargs = self._lm_depth_basis()
+            else:
+                depths = self.sampled_depth.get_parameters(None).detach()
             config = CameraLmConfig(
                 iterations=self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
@@ -1390,9 +1400,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 self.edges_padded.params, depths, self.pad_masks.params.bool(), camera_index,
                 self.intrinsics.get_intrinsic_matrix(None).detach(),
                 self.poses.get_all_matrices().detach(), self.dt_fields.params[:, 0],
-                self.images_hw.params, self.viewgraph_ids[:, :2], config,
+                self.images_hw.params, self.viewgraph_ids[:, :2], config, **depth_kwargs,
             )
             self._write_back_cameras(run.world_to_camera, run.intrinsics)
+            if self.grad_z:
+                self._write_back_depth(run)
             self.unproject_edges_to_3D()
         self._sync()
         self.timings["total_optimization"] = time.perf_counter() - start
@@ -1400,6 +1412,45 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.loss_list = list(run.costs)
         self.compute_mre()
         self.print_summary() if self.verbose else print("=" * 70, end="\n\n")
+
+    def _lm_depth_basis(self):
+        """Base edge depths and the LM depth arguments of the vggt-features module.
+
+        The module's log correction ``beta^T z + log_scale`` lives on the feature grid and
+        is sampled bilinearly at each edge pixel; both steps are linear, so the basis row
+        of an edge pixel is its sampled whitened features followed by a 1 (log scale).
+        Padding channels of images with fewer retained directions are not optimized.
+        """
+        module = self.sampled_depth
+        if self.depth_parameterization != "vggt-features" or self.source_sampling != "edges":
+            raise ValueError("LM depth needs the vggt-features parameterization at edge pixels")
+        model = module.model
+        rank = model.features.shape[1]
+        if rank:
+            sampled = F.grid_sample(model.features, module.sample_grid, mode="bilinear",
+                                    padding_mode="border", align_corners=False)[..., 0]  # [N, R, P]
+        else:  # rank 0: the log scale only
+            sampled = module.depth.new_zeros((module.depth.shape[0], 0, module.depth.shape[1]))
+        basis = torch.cat((sampled.transpose(1, 2), torch.ones_like(module.depth[..., None])), -1)
+        ranks = torch.as_tensor(model.retained_ranks, device=basis.device)
+        active = torch.arange(rank + 1, device=basis.device)[None] < ranks[:, None]
+        active[:, rank] = True  # log scale
+        coefficients = torch.cat((model.beta, model.log_scale[:, None]), 1).detach()
+        return module.depth, dict(depth_basis=basis, depth_coefficients=coefficients,
+                                  depth_active=active)
+
+    def _write_back_depth(self, run):
+        """Store LM's depth coefficients in the vggt-features module and check its edge depths."""
+        module = self.sampled_depth
+        rank = module.model.features.shape[1]
+        module.model.beta.data.copy_(run.depth_coefficients[:, :rank])
+        module.model.log_scale.data.copy_(run.depth_coefficients[:, rank])
+        depths = module.get_parameters(None)
+        valid = module.valid_masks
+        mismatch = float(((depths - run.depths).abs() / depths.clamp_min(1e-12))[valid].max())
+        logger.info(f"LM depth write-back: max relative edge-depth mismatch {mismatch:.2e}.")
+        if mismatch > 1e-3:
+            raise RuntimeError(f"LM depths do not match the depth module ({mismatch:.2e})")
 
     def _write_back_cameras(self, world_to_camera, intrinsics):
         """Store LM's poses and intrinsics in the pose and camera modules (MLP off)."""

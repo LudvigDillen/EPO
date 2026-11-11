@@ -249,6 +249,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_feature_variance_fraction=1.0,
         residual_type="dtf",
         optimizer="adam",
+        lm_depth_start=0.5,
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -312,6 +313,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("optimizer='lm' optimizes depth only with the vggt-features "
                              "parameterization; pass grad_z=False to keep depths fixed")
         self.optimizer = optimizer
+        # LM with free depth: fraction of the iterations with depth fixed (cameras only).
+        self.lm_depth_start = float(lm_depth_start)
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
         self.epo_loss_weight = epo_loss_weight
@@ -1395,6 +1398,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             config = CameraLmConfig(
                 iterations=self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
+                depth_start=self.lm_depth_start,
             )
             run = levenberg_marquardt_edges(
                 self.edges_padded.params, depths, self.pad_masks.params.bool(), camera_index,

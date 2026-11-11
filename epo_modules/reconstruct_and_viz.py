@@ -483,6 +483,7 @@ class ReconstructAndVizModule:
             "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
             "optimizer": self.optimizer,
+            "lm_depth_start": self.lm_depth_start,
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,

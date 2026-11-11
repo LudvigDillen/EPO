@@ -251,6 +251,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         optimizer="adam",
         lm_depth_start=0.5,
         lm_clamp_iterations=25,
+        lm_edge_samples=0,
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -318,6 +319,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # final clamp, and at the latest for this fraction of the iterations.
         self.lm_depth_start = float(lm_depth_start)
         self.lm_clamp_iterations = int(lm_clamp_iterations)  # LM: iterations to the final clamp
+        self.lm_edge_samples = int(lm_edge_samples)  # LM: residual edges per image (0: all)
         self.lm_depth_free_iteration = None  # LM: first iteration with depth free (logged)
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
@@ -1403,6 +1405,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 iterations=self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
                 depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
+                edge_samples=self.lm_edge_samples,
             )
             run = levenberg_marquardt_edges(
                 self.edges_padded.params, depths, self.pad_masks.params.bool(), camera_index,

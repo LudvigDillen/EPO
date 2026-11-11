@@ -210,6 +210,9 @@ def main():
                              "at most for this fraction of the iterations")
     parser.add_argument("--lm-clamp-iterations", type=int, default=25,
                         help="LM: iterations over which the residual clamp reaches its final value")
+    parser.add_argument("--lm-edge-samples", type=int, default=2048,
+                        help="LM: a fixed random subset of this many edges per image as residual "
+                             "sources (0: all); the distance fields keep every edge")
     parser.add_argument("--grad-z", action=argparse.BooleanOptionalAction, default=True,
                         help="Optimize depth; --no-grad-z keeps the initial depths fixed")
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
@@ -248,6 +251,7 @@ def main():
         optimizer=args.optimizer,
         lm_depth_start=args.lm_depth_start,
         lm_clamp_iterations=args.lm_clamp_iterations,
+        lm_edge_samples=args.lm_edge_samples,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,
         depth_normal_weight_schedule=args.depth_normal_weight_schedule,

@@ -10,7 +10,9 @@ module.
 
 Differences from ``VGGTWrapper``:
 - Model class is ``VGGTOmega`` instead of ``VGGT``.
-- Native square resolution is 512 (patch size 16) instead of VGGT's 518.
+- Native square resolution is the checkpoint's (patch size 16) instead of VGGT's 518:
+  512 for ``vggt_omega_1b_512.pt``, 416 for ``vggt_omega_1b_416_reproduce.pt`` (the one
+  released for benchmarking), read from the file name (``VGGT_OMEGA_RESOLUTION`` overrides).
 - Inference is a single ``model(images)`` dict call; the 9D pose encoding
   (translation, quaternion, FoV) is decoded via ``encoding_to_camera``
   instead of ``pose_encoding_to_extri_intri``.
@@ -25,6 +27,7 @@ Used via ``from wrapper.vggt_omega_wrapper import VGGTOmegaWrapper``.
 """
 
 import os
+import re
 import sys
 
 # Make the pristine vggt-omega submodule importable as ``vggt_omega``, the
@@ -93,14 +96,24 @@ class VGGTOmegaWrapper(BaseWrapper):
         # Load model
         self.model = self._load_model(model_path)
 
-        # Fixed resolutions (VGGT-Omega-1B-512 native resolution, patch 16).
-        self.vggt_fixed_resolution = 512
+        # The checkpoint's native square resolution (patch 16), e.g. 512 or 416.
+        self.vggt_fixed_resolution = self._native_resolution(model_path)
         self.img_load_resolution = 768
         # Set per forward() call; _run_vggt then keeps the depth-head inputs.
         self._capture_features = False
         self.head_features = None
 
         print(f"VGGTOmegaWrapper initialized on {self.device}")
+
+    @staticmethod
+    def _native_resolution(model_path: str) -> int:
+        """Square input size of a checkpoint: ``vggt_omega_1b_<size>[_...].pt``, else 512."""
+        override = os.environ.get("VGGT_OMEGA_RESOLUTION")
+        match = re.search(r"vggt_omega_1b_(\d+)", os.path.basename(str(model_path)))
+        resolution = int(override) if override else int(match.group(1)) if match else 512
+        if resolution % 16:
+            raise ValueError(f"VGGT-Omega resolution {resolution} is not a multiple of the patch size 16")
+        return resolution
 
     def _load_model(self, model_path: str) -> VGGTOmega:
         """Load the VGGT-Omega model from a local checkpoint file or a URL."""
@@ -182,7 +195,7 @@ class VGGTOmegaWrapper(BaseWrapper):
     ) -> list[dict]:
         """Place VGGT-Omega's outputs relative to the original images.
 
-        VGGT-Omega infers on a square, letterboxed 512 px frame, so this is the
+        VGGT-Omega infers on a square, letterboxed frame at its native resolution, so this is the
         shared letterbox recipe (``BaseWrapper._ff_entries_letterbox``),
         identical to VGGT's apart from the resolution.
         """

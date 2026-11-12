@@ -487,7 +487,6 @@ class ReconstructAndVizModule:
             "lm_clamp_iterations": self.lm_clamp_iterations,
             "lm_edge_samples": self.lm_edge_samples,
             "lm_pairs_per_image": getattr(self, "lm_pairs_per_image", 0),
-            "lm_step_expansions": getattr(self, "lm_step_expansions", 0),
             "lm_pair_count": getattr(self, "lm_pair_count", None),  # LM only
             "early_stop": getattr(self, "early_stop", None),  # Adam only; None for LM
             "lm_depth_free_iteration": self.lm_depth_free_iteration,

@@ -253,7 +253,6 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         lm_clamp_iterations=25,
         lm_edge_samples=0,
         lm_pairs_per_image=0,
-        lm_step_expansions=0,
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -324,7 +323,6 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.lm_edge_samples = int(lm_edge_samples)  # LM: residual edges per image (0: all)
         # LM: each image keeps its strongest view-graph pairs (reprojection inliers; 0: all).
         self.lm_pairs_per_image = int(lm_pairs_per_image)
-        self.lm_step_expansions = int(lm_step_expansions)  # LM: line-search doublings per step
         self.lm_depth_free_iteration = None  # LM: first iteration with depth free (logged)
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
@@ -1412,7 +1410,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 iterations=self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
                 depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
-                edge_samples=self.lm_edge_samples, step_expansions=self.lm_step_expansions,
+                edge_samples=self.lm_edge_samples,
             )
             pairs = self.viewgraph_ids[:, :2]
             if self.lm_pairs_per_image:

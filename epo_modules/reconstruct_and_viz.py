@@ -486,6 +486,7 @@ class ReconstructAndVizModule:
             "lm_depth_start": self.lm_depth_start,
             "lm_clamp_iterations": self.lm_clamp_iterations,
             "lm_edge_samples": self.lm_edge_samples,
+            "early_stop": getattr(self, "early_stop", None),  # Adam only; None for LM
             "lm_depth_free_iteration": self.lm_depth_free_iteration,
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,

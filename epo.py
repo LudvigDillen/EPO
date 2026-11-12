@@ -886,6 +886,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.convergence_tol_depth = convergence_tol_depth
         self.convergence_tol_loss = convergence_tol_loss
         self.optim_convergence = True if early_stop == "none" else False
+        self.early_stop = early_stop  # logged in training_logs.json
 
         # Reset per-iter accumulators so a second `forward()` call starts
         # clean (otherwise totals leak from the prior run while

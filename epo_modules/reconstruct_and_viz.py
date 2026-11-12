@@ -483,6 +483,8 @@ class ReconstructAndVizModule:
             "joint_from_start": self.joint_from_start,
             "residual_type": self.residual_type,
             "optimizer": self.optimizer,
+            "optimizer_requested": getattr(self, "optimizer_requested", self.optimizer),
+            "lm_iterations": getattr(self, "lm_iterations", None),
             "lm_depth_start": self.lm_depth_start,
             "lm_clamp_iterations": self.lm_clamp_iterations,
             "lm_edge_samples": self.lm_edge_samples,

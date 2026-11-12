@@ -187,9 +187,14 @@ def main():
         help="Source points for depth residuals; uniform covers the valid image grid.",
     )
     parser.add_argument("--uniform-samples-per-image", type=int, default=12288)
-    parser.add_argument("--optimizer", choices=("adam", "lm"), default="adam",
+    parser.add_argument("--optimizer", choices=("adam", "lm", "auto"), default="adam",
                         help="lm: Levenberg-Marquardt over poses and focal lengths on the edge "
-                             "objective with depths fixed (--max_iterations LM iterations)")
+                             "objective with depths fixed (--max_iterations LM iterations); "
+                             "auto: LM if the view graph fits in one Adam step "
+                             "(max_viewgraph_pairs), else Adam")
+    parser.add_argument("--lm-iterations", type=int, default=None,
+                        help="LM iterations (default: --max_iterations, which stays Adam's "
+                             "budget with --optimizer auto)")
     parser.add_argument("--depth-target-resolution", type=int, default=128,
                         help="Long side of the target depth banks that depth residuals sample "
                              "and the normal term runs on")
@@ -252,6 +257,7 @@ def main():
         z_lr=args.depth_learning_rate,
         residual_type=args.residual_type,
         optimizer=args.optimizer,
+        lm_iterations=args.lm_iterations,
         lm_depth_start=args.lm_depth_start,
         lm_clamp_iterations=args.lm_clamp_iterations,
         lm_edge_samples=args.lm_edge_samples,

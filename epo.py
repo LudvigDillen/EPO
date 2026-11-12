@@ -249,6 +249,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         depth_feature_variance_fraction=1.0,
         residual_type="dtf",
         optimizer="adam",
+        lm_iterations=None,
         lm_depth_start=0.5,
         lm_clamp_iterations=25,
         lm_edge_samples=0,
@@ -308,14 +309,21 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # "lm": Levenberg-Marquardt on the edge objective instead of Adam, over poses,
         # focal lengths and, with grad_z, the vggt-features depth coefficients
         # (depth_refinement.optimization.lm_cameras); grad_z=False keeps depths fixed.
-        if optimizer not in ("adam", "lm"):
-            raise ValueError("optimizer must be 'adam' or 'lm'")
-        if optimizer == "lm" and (residual_type != "dtf" or camera_model != "SIMPLE_PINHOLE"):
-            raise ValueError("optimizer='lm' supports the edge residual with SIMPLE_PINHOLE cameras")
-        if optimizer == "lm" and grad_z and depth_parameterization != "vggt-features":
-            raise ValueError("optimizer='lm' optimizes depth only with the vggt-features "
-                             "parameterization; pass grad_z=False to keep depths fixed")
+        # "auto": LM when the whole view graph fits in one Adam step (at most
+        # max_viewgraph_pairs pairs), so every LM iteration sees exactly the residuals of an
+        # Adam step; Adam otherwise. Chosen once the view graph is built (forward).
+        if optimizer not in ("adam", "lm", "auto"):
+            raise ValueError("optimizer must be 'adam', 'lm' or 'auto'")
+        if optimizer != "adam" and (residual_type != "dtf" or camera_model != "SIMPLE_PINHOLE"):
+            raise ValueError(f"optimizer='{optimizer}' supports the edge residual with "
+                             "SIMPLE_PINHOLE cameras")
+        if optimizer != "adam" and grad_z and depth_parameterization != "vggt-features":
+            raise ValueError(f"optimizer='{optimizer}' optimizes depth only with the "
+                             "vggt-features parameterization; pass grad_z=False to keep depths fixed")
         self.optimizer = optimizer
+        self.optimizer_requested = optimizer  # "auto" keeps this; self.optimizer is the choice
+        # LM iterations; None: max_num_iterations (which stays Adam's budget under "auto").
+        self.lm_iterations = None if lm_iterations is None else int(lm_iterations)
         # LM with free depth: depth is fixed (cameras only) until the cameras converge at the
         # final clamp, and at the latest for this fraction of the iterations.
         self.lm_depth_start = float(lm_depth_start)
@@ -917,6 +925,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         # fine too, but binding here makes the gating obvious where it matters.
         log_t = self.log_granular_time
 
+        if self.optimizer_requested == "auto":
+            self.optimizer = "lm" if self.len_viewgraph <= self.max_viewgraph_pairs else "adam"
+            logger.info(f"optimizer auto: {self.optimizer} ({self.len_viewgraph:,} view-graph "
+                        f"pairs, Adam batch {self.max_viewgraph_pairs:,})")
         if self.optimizer == "lm":
             self._forward_lm(clamp_start=clamp_start, clamp_end=clamp_end,
                              huber_delta=huber_delta)
@@ -1407,7 +1419,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             else:
                 depths = self.sampled_depth.get_parameters(None).detach()
             config = CameraLmConfig(
-                iterations=self.max_num_iterations, clamp_start=clamp_start,
+                iterations=self.lm_iterations or self.max_num_iterations, clamp_start=clamp_start,
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
                 depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
                 edge_samples=self.lm_edge_samples,

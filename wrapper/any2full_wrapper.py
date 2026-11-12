@@ -313,10 +313,12 @@ class Any2FullWrapper:
         dense_depths = {}
         total_points = 0
         start = time.time()
+        load_seconds = forward_seconds = 0.0  # breakdown of run_any2full
         with tqdm(total=num_images, desc="Densifying depths") as pbar:
             for hw, items in by_size.items():
                 for i in range(0, len(items), batch_size):
                     chunk = items[i : i + batch_size]
+                    load_start = time.time()
 
                     # Decode + resize releases the GIL, so loading the batch's
                     # images in parallel overlaps with nothing else running here.
@@ -332,7 +334,12 @@ class Any2FullWrapper:
                     rgb = torch.cat([t for t, _ in loaded])  # (B, 3, H, W)
                     sparse = torch.stack([s for _, s in chunk]).unsqueeze(1)
 
+                    forward_start = time.time()
                     dense = self._densify(rgb, sparse)  # (B, H, W)
+                    if dense.is_cuda:
+                        torch.cuda.synchronize(dense.device)
+                    load_seconds += forward_start - load_start
+                    forward_seconds += time.time() - forward_start
 
                     for (image, _), depth, (_, rgb_uint8) in zip(
                         chunk, dense, loaded, strict=True
@@ -356,7 +363,11 @@ class Any2FullWrapper:
                         total_points += len(points)
                     pbar.update(len(chunk))
 
-        self.last_timings = {"run_any2full": time.time() - start}
+        self.last_timings = {
+            "run_any2full": time.time() - start,  # all of it, incl. building the cloud
+            "load_images": load_seconds,
+            "any2full_forward": forward_seconds,
+        }
         logger.info(
             f"Fused {total_points:,} points from {len(dense_depths)} depth maps "
             f"(randomly subsampled to <= {max_points_per_image:,} per image)"

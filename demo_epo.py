@@ -406,6 +406,10 @@ def main():
             f"Densification time: {densifier.last_timings['run_any2full']:.2f} s "
             f"-> {dense_output_path(epo_out)}"
         )
+        with open(os.path.join(dense_output_path(epo_out), "timings.txt"), "w") as handle:
+            handle.writelines(
+                f"{key}: {value:.4f} s\n" for key, value in densifier.last_timings.items()
+            )
         del densifier
         gc.collect()
         torch.cuda.empty_cache()

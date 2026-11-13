@@ -268,6 +268,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         epo_loss_weight=0.0,
         depth_normal_weight_schedule="constant",
         depth_normal_max_relative_jump=0.15,
+        depth_ridge_weight=0.0,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -346,9 +347,24 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("depth_normal_weight must be finite and non-negative")
         if not math.isfinite(depth_normal_max_relative_jump) or depth_normal_max_relative_jump < 0:
             raise ValueError("depth_normal_max_relative_jump must be finite and non-negative")
-        if depth_normal_weight > 0 and residual_type != "depth":
-            raise ValueError("Depth normal supervision currently requires residual_type='depth'")
+        # Normal preservation needs a dense depth bank: the depth residuals' targets, or, with
+        # the edge residual, a bank of the initial depth kept for the normal term alone (the
+        # vggt-features parameterization, whose correction is defined on the whole image).
+        if depth_normal_weight > 0 and residual_type != "depth" and depth_parameterization != "vggt-features":
+            raise ValueError("Depth normal supervision requires residual_type='depth' or the "
+                             "vggt-features parameterization")
         self.depth_normal_weight = depth_normal_weight
+        # Ridge depth_ridge_weight / 2 * sum_i |beta_i|^2 on the vggt-features shape
+        # coefficients (not the log scale), added to the loss as is (not divided by a count).
+        if not math.isfinite(depth_ridge_weight) or depth_ridge_weight < 0:
+            raise ValueError("depth_ridge_weight must be finite and non-negative")
+        if depth_ridge_weight > 0 and depth_parameterization != "vggt-features":
+            raise ValueError("depth_ridge_weight needs the vggt-features parameterization")
+        self.depth_ridge_weight = float(depth_ridge_weight)
+        if self.optimizer_requested != "adam" and depth_normal_weight > 0 and (
+            depth_normal_weight_schedule != "constant" or not grad_z
+        ):
+            raise ValueError("LM's normal term needs grad_z and the constant schedule")
         if depth_normal_weight_schedule not in ("constant", "linear"):
             raise ValueError("depth_normal_weight_schedule must be 'constant' or 'linear'")
         self.depth_normal_weight_schedule = depth_normal_weight_schedule
@@ -689,8 +705,17 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             intrinsics = self.intrinsics.get_intrinsic_matrix(
                 torch.tensor(camera_indices, device=self.device)
             ).detach()
+            # The depth bank: the depth residuals' targets, or (vggt-features with the edge
+            # residual) the initial depth for the normal term only.
+            normal_bank = (self.depth_parameterization == "vggt-features"
+                           and self.depth_normal_weight > 0)
             target_depths = (torch.stack([self.images[n]["depth"] for n in image_names])
-                             if self.residual_type == "depth" else None)
+                             if self.residual_type == "depth" or normal_bank else None)
+            if normal_bank and self.residual_type != "depth" and len(
+                {tuple(self.images[n]["hw"]) for n in image_names}
+            ) > 1:
+                raise ValueError("The normal term needs images of one size (the depth bank "
+                                 "spans the padded canvas, the features each image)")
         if self.depth_parameterization == "point-mlp":
             from modules.point_mlp_depth import PointMLPDepthModule
 
@@ -1116,12 +1141,17 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 epo_loss = self.compute_batched_loss(edge_residuals, debug=debug)
                 loss = loss + self.epo_loss_weight * epo_loss
             if self.depth_normal_prior is not None:
-                normal_loss = self.depth_normal_prior(self.current_target_depths)
+                # With the edge residual the bank serves the normal term alone (all images).
+                bank = (self.current_target_depths if self.residual_type == "depth"
+                        else self.sampled_depth.get_depths_and_target_bank(None)[1])
+                normal_loss = self.depth_normal_prior(bank)
                 normal_weight = normal_loss_weight(
                     step, self.max_num_iterations, self.depth_normal_weight,
                     self.depth_normal_weight_schedule,
                 )
                 loss = loss + normal_weight * normal_loss
+            if self.depth_ridge_weight > 0:
+                loss = loss + 0.5 * self.depth_ridge_weight * self.sampled_depth.model.beta.square().sum()
             s_time = time.perf_counter()
             loss.backward()
             self._sync_for_timing()  # backward() returns before the GPU is done
@@ -1423,7 +1453,11 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
                 depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
                 edge_samples=self.lm_edge_samples,
+                normal_weight=self.depth_normal_weight if self.grad_z else 0.0,
+                ridge_weight=self.depth_ridge_weight if self.grad_z else 0.0,
             )
+            if self.grad_z and self.depth_normal_weight > 0:
+                depth_kwargs["normal_bank"] = self._lm_normal_bank()
             pairs = self.viewgraph_ids[:, :2]
             if self.lm_pairs_per_image:
                 scores = torch.tensor([float(self.valid_points_per_pair[pair])
@@ -1437,6 +1471,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 self.images_hw.params, pairs, config, **depth_kwargs,
             )
             self._write_back_cameras(run.world_to_camera, run.intrinsics)
+            self.lm_terms = dict(run.terms)  # final cost per term (edges, normal, ridge)
+            logger.info("LM final cost per term: " + ", ".join(f"{k} {v:.6g}" for k, v in run.terms.items()))
             if self.grad_z:
                 self._write_back_depth(run)
             self.unproject_edges_to_3D()
@@ -1473,6 +1509,26 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         coefficients = torch.cat((model.beta, model.log_scale[:, None]), 1).detach()
         return module.depth, dict(depth_basis=basis, depth_coefficients=coefficients,
                                   depth_active=active)
+
+    def _lm_normal_bank(self):
+        """The normal term of Adam (``self.depth_normal_prior``) as LM's ``NormalBank``.
+
+        Same bank, rays, reference normals and stencils; the log-depth basis on the bank is
+        the whitened features resampled as ``resample_correction`` resamples the correction
+        (both are linear), followed by ones (log scale).
+        """
+        from depth_refinement.optimization.lm_cameras import NormalBank
+
+        module, prior = self.sampled_depth, self.depth_normal_prior
+        features = module.model.features  # [N, R, h, w]
+        size = tuple(module.target_size)
+        resampled = (F.interpolate(features, size, mode="bilinear", align_corners=False,
+                                   antialias=True) if features.shape[1]
+                     else features.new_zeros((features.shape[0], 0, *size)))
+        basis = torch.cat((resampled, torch.ones_like(resampled[:, :1]) if resampled.shape[1]
+                           else features.new_ones((features.shape[0], 1, *size))), 1)
+        return NormalBank(module.target_bank, module.target_valid_masks, prior.rays,
+                          prior.reference_normals, prior.reference_valid, basis)
 
     def _write_back_depth(self, run):
         """Store LM's depth coefficients in the vggt-features module and check its edge depths."""

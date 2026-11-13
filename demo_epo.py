@@ -173,7 +173,11 @@ def main():
     parser.add_argument("--depth-learning-rate", type=float, default=3e-3,
                         help="Base learning rate for depth correction (MLP or affine); keeps EPO's scheduler")
     parser.add_argument("--depth-normal-weight", type=float, default=0.0,
-                        help="Weight of initial-depth normal preservation (depth residuals only; 0 disables)")
+                        help="Weight of initial-depth normal preservation (depth residuals, or "
+                             "vggt-features with the edge residual; 0 disables)")
+    parser.add_argument("--depth-ridge-weight", type=float, default=0.0,
+                        help="Ridge weight lambda: lambda/2 * sum_i |beta_i|^2 on the vggt-features "
+                             "shape coefficients (not the log scale; 0 disables)")
     parser.add_argument("--depth-normal-weight-schedule", choices=("constant", "linear"),
                         default="constant", help="Linear decays normal weight to one tenth over the full run")
     parser.add_argument("--depth-normal-max-relative-jump", type=float, default=0.15,
@@ -271,6 +275,7 @@ def main():
         depth_normal_weight=args.depth_normal_weight,
         depth_normal_weight_schedule=args.depth_normal_weight_schedule,
         depth_normal_max_relative_jump=args.depth_normal_max_relative_jump,
+        depth_ridge_weight=args.depth_ridge_weight,
         depth_graduated_nonconvexity=args.depth_graduated_nonconvexity,
         depth_graduated_threshold_start=args.depth_graduated_threshold_start,
         depth_graduated_threshold_end=args.depth_graduated_threshold_end,

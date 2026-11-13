@@ -497,6 +497,11 @@ class ReconstructAndVizModule:
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,
+            "depth_ridge_weight": getattr(self, "depth_ridge_weight", 0.0),
+            "lm_terms": getattr(self, "lm_terms", None),
+            # sum_i |beta_i|^2 of the vggt-features shape coefficients at the end (ridge scale)
+            "depth_beta_squared": (float(self.sampled_depth.model.beta.detach().square().sum())
+                                   if self.depth_parameterization == "vggt-features" else None),
             "source_sampling": self.source_sampling,
             "uniform_samples_per_image": self.uniform_samples_per_image,
             "depth_target_resolution": self.depth_target_resolution,

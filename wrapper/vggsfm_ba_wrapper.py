@@ -165,8 +165,8 @@ def track_and_adjust(names, images, extrinsics, intrinsics, depth, conf, args):
         np.array([TRACK_RESOLUTION, TRACK_RESOLUTION]),
         masks=vis > args.vis_thresh,
         max_reproj_error=args.max_reproj_error,
-        shared_camera=True,
-        camera_type="PINHOLE",
+        shared_camera=getattr(args, "shared_camera", True),  # False: one camera per image
+        camera_type=getattr(args, "camera_type", "PINHOLE"),
         points_rgb=colors,
         image_names=names,
     )

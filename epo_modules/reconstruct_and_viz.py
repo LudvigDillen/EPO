@@ -481,6 +481,8 @@ class ReconstructAndVizModule:
             "depth_feature_rank": self.depth_feature_rank,
             "depth_feature_variance_fraction": self.depth_feature_variance_fraction,
             "joint_from_start": self.joint_from_start,
+            "single_camera_per_folder": self.single_camera_per_folder,
+            "num_cameras": len(self.intrinsics.image_to_tensor_idx),
             "residual_type": self.residual_type,
             "optimizer": self.optimizer,
             "optimizer_requested": getattr(self, "optimizer_requested", self.optimizer),

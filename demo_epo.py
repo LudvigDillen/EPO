@@ -225,6 +225,11 @@ def main():
                         help="Optimize depth; --no-grad-z keeps the initial depths fixed")
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
                         help="Optimize depth jointly with poses/intrinsics from the first iteration")
+    parser.add_argument("--single-camera-per-folder", action=argparse.BooleanOptionalAction,
+                        default=True,
+                        help="Share one camera across the images of a folder (EPO's default); "
+                             "--no-single-camera-per-folder keeps one camera per image, for image "
+                             "sets whose focal length varies (e.g. zooming aerial renders)")
     args = parser.parse_args()
     if not 0 < args.depth_learning_rate < float("inf"):
         parser.error("--depth-learning-rate must be finite and positive")
@@ -273,7 +278,7 @@ def main():
         uniform_samples_per_image=args.uniform_samples_per_image,
         depth_target_resolution=args.depth_target_resolution,
         extract_edges_for_visualization=args.extract_edges_for_visualization,
-        single_camera_per_folder=True,  # share one camera across all "<cam_id>/..." images.
+        single_camera_per_folder=args.single_camera_per_folder,  # one camera per "<cam_id>/..." folder
         verbose=False,
         log_granular_time=False,
         device=f"cuda:{args.cuda_id}",

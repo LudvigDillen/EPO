@@ -173,7 +173,9 @@ def track_and_adjust(names, images, extrinsics, intrinsics, depth, conf, args):
     if recon is None:
         raise SystemExit("no valid tracks after the reprojection filter")
     options = pycolmap.BundleAdjustmentOptions()
-    options.refine_principal_point = True  # as the vggt BA path
+    # As the vggt BA path; with one camera per image the principal point is better fixed, since
+    # it trades off against rotation and the export puts it back at the image centre.
+    options.refine_principal_point = getattr(args, "refine_principal_point", True)
     pycolmap.bundle_adjustment(recon, options)
     # BA's robust loss tolerates degenerate points rather than removing them;
     # apply the mapper's own post-BA point filter so the export is sane.

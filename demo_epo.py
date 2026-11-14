@@ -192,6 +192,17 @@ def main():
                              "objective with depths fixed (--max_iterations LM iterations); "
                              "auto: LM if the view graph fits in one Adam step "
                              "(max_viewgraph_pairs), else Adam")
+    # Edge objective: clamp min(e, tau) annealed from --clamp-start to --clamp-end, then Huber.
+    # Ours (vggt-features, Adam, LM and auto) defaults to a tighter clamp and Huber threshold.
+    # EPO's own parameterizations keep its settings.
+    parser.add_argument("--clamp-start", type=float, default=10.0,
+                        help="Edge residual clamp (px) at the start, annealed to --clamp-end (Adam and LM)")
+    parser.add_argument("--clamp-end", type=float, default=None,
+                        help="Final edge residual clamp (px); residuals above it get no gradient. "
+                             "Default: 1.5 for vggt-features (ours), 6 (EPO's) otherwise")
+    parser.add_argument("--huber-delta", type=float, default=None,
+                        help="Huber threshold (px) of the edge residual (Adam and LM). "
+                             "Default: 0.75 for vggt-features (ours), 1 (EPO's) otherwise")
     parser.add_argument("--lm-iterations", type=int, default=None,
                         help="LM iterations (default: --max_iterations, which stays Adam's "
                              "budget with --optimizer auto)")
@@ -333,7 +344,11 @@ def main():
 
     # ── 2. EPO refinement (timed) ────────────────────────────────────────
     print("\nRunning EPO refinement...")
+    ours = args.depth_parameterization == "vggt-features"
+    clamp_end = args.clamp_end if args.clamp_end is not None else (1.5 if ours else 6.0)
+    huber_delta = args.huber_delta if args.huber_delta is not None else (0.75 if ours else 1.0)
     epo(early_stop=args.early_stop, use_rerun=args.visualize,
+        huber_delta=huber_delta, clamp_start=args.clamp_start, clamp_end=clamp_end,
         visualization_gt_path=args.visualization_gt,
         rerun_points_interval=args.rerun_points_interval, rerun_max_points=args.rerun_max_points,
         spawn_rerun=args.spawn_rerun, rerun_save_path=args.output_path,

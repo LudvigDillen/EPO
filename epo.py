@@ -888,6 +888,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
 
         """
         assert early_stop in ["none", "pose", "loss"]
+        if not 0 < clamp_end <= clamp_start or not huber_delta > 0:
+            raise ValueError("Need 0 < clamp_end <= clamp_start and huber_delta > 0")
+        # Edge objective settings of this run (logged).
+        self.edge_clamp_start, self.edge_clamp_end, self.edge_huber_delta = clamp_start, clamp_end, huber_delta
 
         # assuming to to do not changes these or move to init
         self.window_pose = window_pose

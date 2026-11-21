@@ -104,3 +104,26 @@ def test_normal_loss_reuses_single_mlp_bank_evaluation():
         prior(current).backward()
         assert evaluate.call_count == 1
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in module.parameters())
+
+
+def test_normals_follow_the_current_focal_length():
+    # Slanted planes: at the initial intrinsics the prior is its fixed-ray self (zero at the
+    # initial depth); a different focal length turns the normals, with a gradient on it.
+    height, width = 9, 11
+    v, u = torch.meshgrid(torch.linspace(-1, 1, height), torch.linspace(-1, 1, width), indexing="ij")
+    depths = (2 + 0.3 * u + 0.2 * v)[None].repeat(2, 1, 1).double()
+    valid = torch.ones_like(depths, dtype=torch.bool)
+    K = torch.tensor([[8.0, 0, 5.0], [0, 8.0, 4.0], [0, 0, 1]], dtype=torch.float64).repeat(2, 1, 1)
+    prior = DepthNormalPrior(depths, valid, K)
+    refined = depths * (1 + 0.05 * u.double())
+    torch.testing.assert_close(prior(refined, intrinsics=K), prior(refined))
+    assert float(prior(depths, intrinsics=K)) < 1e-12
+    log_focal = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    scale = torch.ones(2, 3, 3, dtype=torch.float64)
+    scale = scale + torch.zeros(3, 3, dtype=torch.float64).index_put_(
+        (torch.tensor([0, 1]), torch.tensor([0, 1])), torch.ones(2, dtype=torch.float64)) * (
+        torch.exp(0.1 + log_focal)[:, None, None] - 1)
+    loss = prior(depths, intrinsics=K * scale)
+    assert float(loss) > 1e-6
+    loss.backward()
+    assert float(log_focal.grad.abs().min()) > 0

@@ -494,12 +494,24 @@ class ReconstructAndVizModule:
             "lm_clamp_iterations": self.lm_clamp_iterations,
             "lm_edge_samples": self.lm_edge_samples,
             "lm_pairs_per_image": getattr(self, "lm_pairs_per_image", 0),
+            "lm_depth_weight": getattr(self, "lm_depth_weight", 0.0),
+            "lm_depth_samples": getattr(self, "lm_depth_samples", None),
+            "lm_depth_threshold": getattr(self, "lm_depth_threshold", None),
+            "lm_depth_threshold_end": getattr(self, "lm_depth_threshold_end", None),
+            "lm_depth_max_jump": getattr(self, "lm_depth_max_jump", None),
+            "lm_depth_every": getattr(self, "lm_depth_every", 1),
+            "edge_weight": getattr(self, "edge_weight", 1.0),
             "lm_pair_count": getattr(self, "lm_pair_count", None),  # LM only
             "early_stop": getattr(self, "early_stop", None),  # Adam only; None for LM
             "lm_depth_free_iteration": self.lm_depth_free_iteration,
             "depth_normal_weight": self.depth_normal_weight,
             "depth_normal_weight_schedule": self.depth_normal_weight_schedule,
             "depth_normal_max_relative_jump": self.depth_normal_max_relative_jump,
+            "depth_ridge_weight": getattr(self, "depth_ridge_weight", 0.0),
+            "lm_terms": getattr(self, "lm_terms", None),
+            # sum_i |beta_i|^2 of the vggt-features shape coefficients at the end (ridge scale)
+            "depth_beta_squared": (float(self.sampled_depth.model.beta.detach().square().sum())
+                                   if self.depth_parameterization == "vggt-features" else None),
             "source_sampling": self.source_sampling,
             "uniform_samples_per_image": self.uniform_samples_per_image,
             "depth_target_resolution": self.depth_target_resolution,

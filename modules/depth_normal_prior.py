@@ -22,9 +22,12 @@ class DepthNormalPrior(nn.Module):
         self.register_buffer("reference_normals", reference.detach())
         self.register_buffer("reference_valid", valid.detach())
 
-    def forward(self, current_depths):
-        """Regularize the already-evaluated bank; no extra MLP or pose/K evaluation."""
+    def forward(self, current_depths, intrinsics=None):
+        """Regularize the already-evaluated bank. With ``intrinsics`` ``[N, 3, 3]`` (each image's
+        current K in bank pixels) its points are back-projected with their rays, so the normals
+        follow the focal length; the reference normals keep the initial rays."""
+        rays = self.rays if intrinsics is None else camera_rays(intrinsics, *current_depths.shape[-2:])
         return normal_preservation_loss(
-            current_depths, self.valid_masks, self.rays,
+            current_depths, self.valid_masks, rays,
             self.reference_normals, self.reference_valid,
         )

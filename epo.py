@@ -79,6 +79,9 @@ warnings.filterwarnings(
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Adam: steps over which the edge clamp anneals to its final value (compute_forward_step's warm-up).
+ADAM_CLAMP_WARMUP = 1000
+
 # Camera models EPO can refine (and exports in). SIMPLE_RADIAL adds one radial
 # distortion term k1 per camera, self-calibrated with the focal.
 CAMERA_MODELS = ("SIMPLE_PINHOLE", "SIMPLE_RADIAL")
@@ -254,6 +257,13 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         lm_clamp_iterations=25,
         lm_edge_samples=0,
         lm_pairs_per_image=0,
+        lm_depth_weight=0.0,
+        lm_depth_samples=2048,
+        lm_depth_threshold=0.1,
+        lm_depth_threshold_end=None,
+        lm_depth_max_jump=0.25,
+        lm_depth_every=1,
+        edge_weight=1.0,
         depth_residual_threshold=0.1,
         source_sampling="edges",
         uniform_samples_per_image=12288,
@@ -268,6 +278,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         epo_loss_weight=0.0,
         depth_normal_weight_schedule="constant",
         depth_normal_max_relative_jump=0.15,
+        depth_ridge_weight=0.0,
         _ff_data=None,  # internal; set by `from_ff` to bypass disk loaders
     ):
         super().__init__()
@@ -331,6 +342,37 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.lm_edge_samples = int(lm_edge_samples)  # LM: residual edges per image (0: all)
         # LM: each image keeps its strongest view-graph pairs (reprojection inliers; 0: all).
         self.lm_pairs_per_image = int(lm_pairs_per_image)
+        # Dense depth consistency (weight > 0) next to the edge term, in LM and Adam alike: about
+        # lm_depth_samples uniform source pixels per image against every target's log-depth bank
+        # (depth_target_resolution), truncated at lm_depth_threshold, never across a bank cell
+        # spanning more than lm_depth_max_jump in base log-depth. With lm_depth_threshold_end the
+        # truncation decays linearly to it over the edge clamp's ramp (LM: lm_clamp_iterations;
+        # Adam: the clamp's warm-up steps, ADAM_CLAMP_WARMUP), then holds.
+        self.lm_depth_weight = float(lm_depth_weight)
+        self.lm_depth_samples = int(lm_depth_samples)
+        self.lm_depth_threshold = float(lm_depth_threshold)
+        self.lm_depth_threshold_end = None if lm_depth_threshold_end is None else float(lm_depth_threshold_end)
+        if self.lm_depth_threshold_end is not None and not 0 < self.lm_depth_threshold_end <= self.lm_depth_threshold:
+            raise ValueError("lm_depth_threshold_end must be in (0, lm_depth_threshold]")
+        self.lm_depth_max_jump = float(lm_depth_max_jump)
+        self.lm_depth_every = int(lm_depth_every)  # LM: the depth term only every this many iterations
+        if self.lm_depth_every < 1:
+            raise ValueError("lm_depth_every must be at least 1")
+        if self.lm_depth_weight < 0 or self.lm_depth_samples < 1 or self.lm_depth_threshold <= 0 \
+                or self.lm_depth_max_jump <= 0:
+            raise ValueError("Depth consistency needs weight >= 0 and positive samples, threshold, max jump")
+        if self.lm_depth_weight > 0 and (depth_parameterization != "vggt-features" or residual_type != "dtf"):
+            raise ValueError("Depth consistency needs the vggt-features parameterization and the edge residual")
+        self._adam_depth = None  # Adam: the depth term's fixed data (built at its first step)
+        # Weight w_dt of the edge (DTF) term, LM and Adam; 0 drops it, leaving depth consistency
+        # (then required: it is what constrains the cameras) and the normal and ridge terms.
+        self.edge_weight = float(edge_weight)
+        if not self.edge_weight >= 0:
+            raise ValueError("edge_weight must be non-negative")
+        if self.edge_weight != 1 and residual_type != "dtf":
+            raise ValueError("edge_weight weights the edge residual (residual_type='dtf')")
+        if self.edge_weight == 0 and self.lm_depth_weight <= 0:
+            raise ValueError("edge_weight 0 needs depth consistency (lm_depth_weight > 0)")
         self.lm_depth_free_iteration = None  # LM: first iteration with depth free (logged)
         if not math.isfinite(epo_loss_weight) or epo_loss_weight < 0:
             raise ValueError("epo_loss_weight must be finite and non-negative")
@@ -346,9 +388,24 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             raise ValueError("depth_normal_weight must be finite and non-negative")
         if not math.isfinite(depth_normal_max_relative_jump) or depth_normal_max_relative_jump < 0:
             raise ValueError("depth_normal_max_relative_jump must be finite and non-negative")
-        if depth_normal_weight > 0 and residual_type != "depth":
-            raise ValueError("Depth normal supervision currently requires residual_type='depth'")
+        # Normal preservation needs a dense depth bank: the depth residuals' targets, or, with
+        # the edge residual, a bank of the initial depth kept for the normal term alone (the
+        # vggt-features parameterization, whose correction is defined on the whole image).
+        if depth_normal_weight > 0 and residual_type != "depth" and depth_parameterization != "vggt-features":
+            raise ValueError("Depth normal supervision requires residual_type='depth' or the "
+                             "vggt-features parameterization")
         self.depth_normal_weight = depth_normal_weight
+        # Ridge depth_ridge_weight / 2 * sum_i |beta_i|^2 on the vggt-features shape
+        # coefficients (not the log scale), added to the loss as is (not divided by a count).
+        if not math.isfinite(depth_ridge_weight) or depth_ridge_weight < 0:
+            raise ValueError("depth_ridge_weight must be finite and non-negative")
+        if depth_ridge_weight > 0 and depth_parameterization != "vggt-features":
+            raise ValueError("depth_ridge_weight needs the vggt-features parameterization")
+        self.depth_ridge_weight = float(depth_ridge_weight)
+        if self.optimizer_requested != "adam" and depth_normal_weight > 0 and (
+            depth_normal_weight_schedule != "constant" or not grad_z
+        ):
+            raise ValueError("LM's normal term needs grad_z and the constant schedule")
         if depth_normal_weight_schedule not in ("constant", "linear"):
             raise ValueError("depth_normal_weight_schedule must be 'constant' or 'linear'")
         self.depth_normal_weight_schedule = depth_normal_weight_schedule
@@ -689,8 +746,17 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             intrinsics = self.intrinsics.get_intrinsic_matrix(
                 torch.tensor(camera_indices, device=self.device)
             ).detach()
+            # The depth bank: the depth residuals' targets, or (vggt-features with the edge
+            # residual) the initial depth for the normal term only.
+            normal_bank = (self.depth_parameterization == "vggt-features"
+                           and self.depth_normal_weight > 0)
             target_depths = (torch.stack([self.images[n]["depth"] for n in image_names])
-                             if self.residual_type == "depth" else None)
+                             if self.residual_type == "depth" or normal_bank else None)
+            if normal_bank and self.residual_type != "depth" and len(
+                {tuple(self.images[n]["hw"]) for n in image_names}
+            ) > 1:
+                raise ValueError("The normal term needs images of one size (the depth bank "
+                                 "spans the padded canvas, the features each image)")
         if self.depth_parameterization == "point-mlp":
             from modules.point_mlp_depth import PointMLPDepthModule
 
@@ -745,6 +811,10 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 initial_bank, module.target_valid_masks, module.target_intrinsics,
                 self.depth_normal_max_relative_jump,
             )
+            # Image pixels to bank pixels (K_bank = S K): the normals' rays follow each image's
+            # current intrinsics (the reference normals keep the initial ones).
+            self.normal_bank_transform = (
+                module.target_intrinsics @ torch.linalg.inv(intrinsics)).detach()  # [N, 3, 3]
 
         # Prepare viewgraph with indices for faster access during optimization.
         # Plain-int dict lookups: map_names_to_indices would build a 1-element
@@ -812,6 +882,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         self.loss_list = []
         self.depth_loss_list = []  # Unweighted data term (depth or DTF).
         self.normal_loss_list = []  # Unweighted normal term; zero when disabled.
+        self.depth_consistency_loss_list = []  # Adam: unweighted depth-consistency term (if any)
         self.epo_loss_list = []  # Unweighted DTF term in combined mode.
         self.residuals = {}
         self.lr_list = {"R": [], "t": [], "mlp": [], "k": [], "z": []}
@@ -1108,7 +1179,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
             # Compute loss
             depth_loss = self.compute_batched_loss(residuals, sampled_viewgraphs, debug=debug)
             normal_loss = depth_loss.new_zeros(())
-            loss = depth_loss
+            loss = self.edge_weight * depth_loss if self.residual_type == "dtf" else depth_loss
             epo_loss = depth_loss.new_zeros(())
             if self.epo_loss_weight > 0:
                 # Reuse the exact selected pairs and the geometry/MLP evaluated above.
@@ -1120,12 +1191,23 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 epo_loss = self.compute_batched_loss(edge_residuals, debug=debug)
                 loss = loss + self.epo_loss_weight * epo_loss
             if self.depth_normal_prior is not None:
-                normal_loss = self.depth_normal_prior(self.current_target_depths)
+                # With the edge residual the bank serves the normal term alone (all images).
+                bank = (self.current_target_depths if self.residual_type == "depth"
+                        else self.sampled_depth.get_depths_and_target_bank(None)[1])
+                normal_loss = self.depth_normal_prior(
+                    bank, intrinsics=self.normal_bank_transform @ self._image_intrinsics())
                 normal_weight = normal_loss_weight(
                     step, self.max_num_iterations, self.depth_normal_weight,
                     self.depth_normal_weight_schedule,
                 )
                 loss = loss + normal_weight * normal_loss
+            if self.depth_ridge_weight > 0:
+                loss = loss + 0.5 * self.depth_ridge_weight * self.sampled_depth.model.beta.square().sum()
+            if self.lm_depth_weight > 0:
+                # The pairs of this step's edge residuals, both directions, as the edge loss.
+                consistency = self._adam_depth_loss(step, sampled_viewgraphs)
+                self.depth_consistency_loss_list.append(float(consistency.detach()))
+                loss = loss + self.lm_depth_weight * consistency
             s_time = time.perf_counter()
             loss.backward()
             self._sync_for_timing()  # backward() returns before the GPU is done
@@ -1427,7 +1509,15 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 clamp_end=clamp_end, huber_delta=huber_delta, optimize_focal=self.grad_k,
                 depth_start=self.lm_depth_start, clamp_iterations=self.lm_clamp_iterations,
                 edge_samples=self.lm_edge_samples,
+                normal_weight=self.depth_normal_weight if self.grad_z else 0.0,
+                ridge_weight=self.depth_ridge_weight if self.grad_z else 0.0,
+                edge_weight=self.edge_weight,
             )
+            if self.grad_z and self.depth_normal_weight > 0:
+                depth_kwargs["normal_bank"] = self._lm_normal_bank()
+            if self.lm_depth_weight > 0:
+                depth_kwargs["depth_term"] = self._lm_depth_term(
+                    camera_index, self.intrinsics.get_intrinsic_matrix(None).detach())
             pairs = self.viewgraph_ids[:, :2]
             if self.lm_pairs_per_image:
                 scores = torch.tensor([float(self.valid_points_per_pair[pair])
@@ -1441,6 +1531,8 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
                 self.images_hw.params, pairs, config, **depth_kwargs,
             )
             self._write_back_cameras(run.world_to_camera, run.intrinsics)
+            self.lm_terms = dict(run.terms)  # final cost per term (edges, normal, ridge)
+            logger.info("LM final cost per term: " + ", ".join(f"{k} {v:.6g}" for k, v in run.terms.items()))
             if self.grad_z:
                 self._write_back_depth(run)
             self.unproject_edges_to_3D()
@@ -1477,6 +1569,150 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         coefficients = torch.cat((model.beta, model.log_scale[:, None]), 1).detach()
         return module.depth, dict(depth_basis=basis, depth_coefficients=coefficients,
                                   depth_active=active)
+
+    def _lm_normal_bank(self):
+        """The normal term of Adam (``self.depth_normal_prior``) as LM's ``NormalBank``.
+
+        Same bank, rays, reference normals and stencils; the log-depth basis on the bank is
+        the whitened features resampled as ``resample_correction`` resamples the correction
+        (both are linear), followed by ones (log scale).
+        """
+        from depth_refinement.optimization.lm_cameras import NormalBank
+
+        module, prior = self.sampled_depth, self.depth_normal_prior
+        features = module.model.features  # [N, R, h, w]
+        size = tuple(module.target_size)
+        resampled = (F.interpolate(features, size, mode="bilinear", align_corners=False,
+                                   antialias=True) if features.shape[1]
+                     else features.new_zeros((features.shape[0], 0, *size)))
+        basis = torch.cat((resampled, torch.ones_like(resampled[:, :1]) if resampled.shape[1]
+                           else features.new_ones((features.shape[0], 1, *size))), 1)
+        return NormalBank(module.target_bank, module.target_valid_masks, prior.rays,
+                          prior.reference_normals, prior.reference_valid, basis,
+                          transform=self.normal_bank_transform)
+
+    def _image_camera_index(self):
+        """``[N]`` camera of each image, in storage order."""
+        image_ids, camera_ids = self.images_cams_ids.unbind(1)
+        camera_index = torch.empty_like(image_ids)
+        camera_index[image_ids] = camera_ids
+        return camera_index
+
+    def _image_intrinsics(self):
+        """``[N, 3, 3]`` current intrinsics of each image (with their gradient during Adam)."""
+        return self.intrinsics.get_intrinsic_matrix(None)[self._image_camera_index()]
+
+    def _lm_depth_term(self, camera_index, camera_intrinsics):
+        """Dense depth consistency for LM: uniform sources, log-depth banks and their bases.
+
+        Sources are a pixel grid of about ``lm_depth_samples`` pixels per image (integer pixel
+        centres, valid base depth); banks are the base depths downsampled to the long side
+        ``depth_target_resolution`` (as the Adam depth residual's), in log. The basis columns are
+        those of ``_lm_depth_basis`` (whitened features, then the log scale), resampled exactly as
+        the module resamples its correction, so ``theta`` means the same at edges, sources and banks.
+        """
+        from depth_refinement.optimization.lm_cameras import DepthTerm
+        from depth_refinement.optimization.residuals import downsample_depth_bank
+
+        module = self.sampled_depth
+        model = module.model
+        names = sorted(self.images, key=lambda name: self.image_id_map[name])  # storage order
+        hws = {tuple(self.images[n]["hw"]) for n in names}
+        if len(hws) != 1:
+            raise ValueError("Depth consistency needs images of one size")
+        height, width = next(iter(hws))
+        device = module.depth.device
+        maps = []
+        for name in names:
+            depth = self.images[name]["depth"].detach().to(device, torch.float32)
+            maps.append(depth.reshape(depth.shape[-2:])[:height, :width])
+        depth_maps = torch.stack(maps)  # [N, H, W]
+        valid_maps = torch.isfinite(depth_maps) & (depth_maps > 0)
+        depth_maps = torch.where(valid_maps, depth_maps, torch.zeros_like(depth_maps))
+        N = len(names)
+        stride = max(1, int(math.sqrt(height * width / self.lm_depth_samples)))
+        ys = torch.arange(stride // 2, height, stride, device=device)
+        xs = torch.arange(stride // 2, width, stride, device=device)
+        gy, gx = torch.meshgrid(ys, xs, indexing="ij")
+        grid_px = torch.stack((gx.flatten(), gy.flatten()), -1)  # [Q, 2] (x, y)
+        src_depths = depth_maps[:, grid_px[:, 1], grid_px[:, 0]]  # [N, Q]
+        src_valid = valid_maps[:, grid_px[:, 1], grid_px[:, 0]]
+        pixels = grid_px.to(torch.float32)[None].expand(N, -1, -1).contiguous()
+        rank = model.features.shape[1]
+        src_basis = bank_basis = None
+        image_intrinsics = camera_intrinsics[camera_index]  # [N, 3, 3]
+        factor = min(1.0, self.depth_target_resolution / max(height, width))
+        size = (max(1, round(height * factor)), max(1, round(width * factor)))
+        bank = downsample_depth_bank(depth_maps, image_intrinsics, valid_masks=valid_maps, output_size=size)
+        bank_valid = bank.valid_masks & torch.isfinite(bank.depths) & (bank.depths > 0)
+        bank_depths = torch.where(bank_valid, bank.depths, torch.ones_like(bank.depths))
+        bank_log = torch.where(bank_valid, torch.log(bank_depths), torch.zeros_like(bank_depths))
+        if self.grad_z:
+            # Sources: the module's bilinear sampling of the feature grid at a pixel.
+            sample_grid = (pixels + 0.5) / torch.tensor([width, height], device=device, dtype=pixels.dtype) * 2 - 1
+            columns, bank_columns = [], []
+            if rank:
+                columns.append(F.grid_sample(model.features, sample_grid[:, :, None], mode="bilinear",
+                                             padding_mode="border", align_corners=False)[..., 0].transpose(1, 2))
+                bank_columns.append(F.interpolate(model.features, size, mode="bilinear",
+                                                  align_corners=False, antialias=True))
+            columns.append(torch.ones_like(src_depths[..., None]))
+            bank_columns.append(torch.ones_like(bank_log[:, None]))
+            src_basis = torch.cat(columns, -1)  # [N, Q, n_theta]
+            bank_basis = torch.cat(bank_columns, 1)  # [N, n_theta, Hb, Wb]
+        logger.info(f"Depth consistency: {pixels.shape[1]} sources per image (stride {stride}), "
+                    f"bank {size[1]}x{size[0]}, weight {self.lm_depth_weight:g}, "
+                    f"threshold {self.lm_depth_threshold:g}"
+                    + ("" if self.lm_depth_threshold_end is None else f" -> {self.lm_depth_threshold_end:g}")
+                    + f", max jump {self.lm_depth_max_jump:g}, "
+                    f"every {self.lm_depth_every} LM iteration(s).")
+        return DepthTerm(
+            pixels=pixels, depths=src_depths, valid=src_valid, basis=src_basis,
+            bank_log_depth=bank_log, bank_valid=bank_valid, bank_basis=bank_basis,
+            bank_transform=bank.intrinsics @ torch.linalg.inv(image_intrinsics),
+            weight=self.lm_depth_weight, threshold=self.lm_depth_threshold,
+            threshold_end=self.lm_depth_threshold_end, max_jump=self.lm_depth_max_jump,
+            every=self.lm_depth_every,
+        )
+
+    def _adam_depth_loss(self, step, sampled_viewgraphs):
+        """The depth term of LM (``_lm_depth_term``) as a differentiable loss for Adam.
+
+        The mean over the step's pairs of the two directions' mean ``min(e^2, tau_d^2) / 2`` over
+        their candidates, normalised like the edge loss (``compute_batched_loss``), at the current
+        poses, intrinsics and depth coefficients; ``tau_d`` decays like the edge clamp.
+        """
+        from depth_refinement.optimization.lm_cameras import depth_cells, depth_consistency_cost
+
+        if self._adam_depth is None:
+            with torch.no_grad():
+                camera_index = self._image_camera_index()
+                term = self._lm_depth_term(camera_index, self.intrinsics.get_intrinsic_matrix(None).detach())
+                self._adam_depth = dict(
+                    pixels_h=torch.cat((term.pixels, torch.ones_like(term.pixels[..., :1])), -1),
+                    depths=term.depths, valid=term.valid & torch.isfinite(term.depths) & (term.depths > 0),
+                    basis=term.basis, L0=term.bank_log_depth, bank_basis=term.bank_basis,
+                    transform=term.bank_transform,
+                    cells=depth_cells(term.bank_log_depth, term.bank_valid, term.max_jump),
+                )
+        data = self._adam_depth
+        model = self.sampled_depth.model
+        theta = torch.cat((model.beta, model.log_scale[:, None]), 1)  # the basis columns' order
+        depths, L = data["depths"], data["L0"]
+        if data["basis"] is not None:
+            depths = torch.where(data["valid"], depths * torch.exp(torch.einsum("nqk,nk->nq", data["basis"], theta)),
+                                 torch.zeros_like(depths))
+            L = L + torch.einsum("nkhw,nk->nhw", data["bank_basis"], theta)
+        K = self._image_intrinsics()
+        points = (data["pixels_h"] @ torch.linalg.inv(K).transpose(1, 2)) * depths[..., None]
+        pairs = torch.cat(sampled_viewgraphs)[:, :2].long()
+        directed = torch.cat((pairs, pairs.flip(1)), 0)
+        tau = self.lm_depth_threshold
+        if self.lm_depth_threshold_end is not None:
+            tau = graduated_residual_threshold(step, 2 * ADAM_CLAMP_WARMUP, tau, self.lm_depth_threshold_end)
+        cost = depth_consistency_cost(points, data["valid"], self.poses.get_projection_matrix(None),
+                                      data["transform"] @ K, L, data["cells"], directed, tau)
+        return cost / len(pairs)
 
     def _write_back_depth(self, run):
         """Store LM's depth coefficients in the vggt-features module and check its edge depths."""
@@ -1799,7 +2035,7 @@ class EPO(nn.Module, MiscModule, ReconstructAndVizModule):
         huber_delta=1.0,
         clamp_start=10.0,
         clamp_end=6.0,
-        clamp_warmup_iters=1000,
+        clamp_warmup_iters=ADAM_CLAMP_WARMUP,
         step=None,
         robust=True,
         objective=None,

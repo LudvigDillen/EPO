@@ -173,7 +173,11 @@ def main():
     parser.add_argument("--depth-learning-rate", type=float, default=3e-3,
                         help="Base learning rate for depth correction (MLP or affine); keeps EPO's scheduler")
     parser.add_argument("--depth-normal-weight", type=float, default=0.0,
-                        help="Weight of initial-depth normal preservation (depth residuals only; 0 disables)")
+                        help="Weight of initial-depth normal preservation (depth residuals, or "
+                             "vggt-features with the edge residual; 0 disables)")
+    parser.add_argument("--depth-ridge-weight", type=float, default=0.0,
+                        help="Ridge weight lambda: lambda/2 * sum_i |beta_i|^2 on the vggt-features "
+                             "shape coefficients (not the log scale; 0 disables)")
     parser.add_argument("--depth-normal-weight-schedule", choices=("constant", "linear"),
                         default="constant", help="Linear decays normal weight to one tenth over the full run")
     parser.add_argument("--depth-normal-max-relative-jump", type=float, default=0.15,
@@ -232,6 +236,23 @@ def main():
     parser.add_argument("--lm-pairs-per-image", type=int, default=0,
                         help="LM: each image keeps only its this many strongest view-graph pairs "
                              "(most reprojection inliers; 0: all pairs)")
+    parser.add_argument("--lm-depth-weight", type=float, default=0.0,
+                        help="Weight of dense depth consistency (log-depth residuals of uniform pixels "
+                             "against each target's depth bank) next to the edge term, LM and Adam; "
+                             "vggt-features only; 0 disables")
+    parser.add_argument("--lm-depth-samples", type=int, default=2048,
+                        help="Depth consistency: uniform source pixels per image")
+    parser.add_argument("--lm-depth-threshold", type=float, default=0.1,
+                        help="Depth consistency: truncation of the log-depth residual")
+    parser.add_argument("--lm-depth-threshold-end", type=float, default=None,
+                        help="Depth consistency: if set, the truncation decays linearly from "
+                             "--lm-depth-threshold to this over the edge clamp's ramp, then holds")
+    parser.add_argument("--lm-depth-max-jump", type=float, default=0.25,
+                        help="Depth consistency: largest base log-depth range over an interpolated bank cell")
+    parser.add_argument("--lm-depth-every", type=int, default=1,
+                        help="Depth consistency (LM): use it only in every this many iterations (1: all)")
+    parser.add_argument("--edge-weight", type=float, default=1.0,
+                        help="Weight of the edge (DTF) term, LM and Adam; 0 drops it (needs --lm-depth-weight)")
     parser.add_argument("--grad-z", action=argparse.BooleanOptionalAction, default=True,
                         help="Optimize depth; --no-grad-z keeps the initial depths fixed")
     parser.add_argument("--joint-from-start", action=argparse.BooleanOptionalAction, default=False,
@@ -278,10 +299,18 @@ def main():
         lm_clamp_iterations=args.lm_clamp_iterations,
         lm_edge_samples=args.lm_edge_samples,
         lm_pairs_per_image=args.lm_pairs_per_image,
+        lm_depth_weight=args.lm_depth_weight,
+        lm_depth_samples=args.lm_depth_samples,
+        lm_depth_threshold=args.lm_depth_threshold,
+        lm_depth_threshold_end=args.lm_depth_threshold_end,
+        lm_depth_max_jump=args.lm_depth_max_jump,
+        lm_depth_every=args.lm_depth_every,
+        edge_weight=args.edge_weight,
         depth_residual_threshold=args.depth_residual_threshold,
         depth_normal_weight=args.depth_normal_weight,
         depth_normal_weight_schedule=args.depth_normal_weight_schedule,
         depth_normal_max_relative_jump=args.depth_normal_max_relative_jump,
+        depth_ridge_weight=args.depth_ridge_weight,
         depth_graduated_nonconvexity=args.depth_graduated_nonconvexity,
         depth_graduated_threshold_start=args.depth_graduated_threshold_start,
         depth_graduated_threshold_end=args.depth_graduated_threshold_end,
